@@ -56,25 +56,56 @@ class Wishbone:
             cos_t + uz**2 * one_minus_cos]
         ])
 
-        # Step 4: Rotate the translated point
+        # rotate the translated point
         rotated_translated_point = R @ translated_point
 
-        # Step 5: Translate back to the original coordinate system
+        # translate back to the original coordinate system
         rotated_point = rotated_translated_point + self.rear
+        
+        # change instance variable of balljoint location
+        # self.balljoint = rotated_point 
 
         return rotated_point #upright balljoint location
 
 class Upright:
-    def __init__(self, upper_balljoint, lower_balljoint, toe_root, toe_link, axle_root, axle_tip):
+    def __init__(self, upper_balljoint, lower_balljoint, toe_root, toe_link, axle_root, axle_tip, wheel_rad):
         # roots are points along the vector between upper and lower balljoint that the orthogonal projection of toe_link and axle tip go to
         # they are used to locate the toe_link and axle_tip relative to the balljoint vector
+
+        #ball joints
         self.upper_balljoint = upper_balljoint
         self.lower_balljoint = lower_balljoint
         self.toe_root = toe_root
         self.toe_link = toe_link
-        self.axle_root = axle_root
+
+        #wheel geometry
+        self.axle_root = axle_root # put this on centerline of wheel
         self.axle_tip = axle_tip
         self.axle_vec = axle_tip - axle_root
+        self.wheel_rad = wheel_rad #wheel is 2d disc orthogonal to axel_vec
+        n = self.axle_vec / np.linalg.norm(self.axle_vec)
+        n_points = 50 #modify this later for speed
+
+        if abs(n[0]) <= abs(n[1]) and abs(n[0]) <= abs(n[2]):
+            v = np.array([1, 0, 0])
+        elif abs(n[1]) <= abs(n[2]):
+            v = np.array([0, 1, 0])
+        else:
+            v = np.array([0, 0, 1])
+
+        # make basis orthogonal to normal
+        u = np.cross(n, v)
+        u /= np.linalg.norm(u)
+
+        w = np.cross(n, u)
+
+        t = np.linspace(0, 2*np.pi, n_points)
+
+        # wheel points
+        self.wheel_circ = self.axle_root + self.wheel_rad * (np.outer(np.cos(t), u) +
+                                    np.outer(np.sin(t), w))
+        
+        # distances for solving rotations
         self.joint_dist = np.linalg.norm(upper_balljoint - lower_balljoint)
         self.upper_toe_dist = np.linalg.norm(upper_balljoint - toe_link)
         self.lower_toe_dist = np.linalg.norm(lower_balljoint - toe_link)
@@ -109,7 +140,10 @@ class Upright:
 
         rotated_toeLink = R @ (toeLink - lower_bj) + lower_bj
         rotated_axleTip = R @ (axleTip - lower_bj) + lower_bj
+        #don't think axle tip is necessary is using the full rotate function in Corner class
 
+        #set new instance variables
+        # self.toe_link = rotated_toeLink
         return rotated_toeLink, rotated_axleTip
     
 class Corner:
@@ -160,6 +194,7 @@ class Corner:
             raise RuntimeError("Failed to solve for lower wishbone theta")
 
         best_theta = result.root
+
         return self.l_wb.rotation(best_theta)
     
     def toe_link_pos_solve(self, upper_theta, rack_pos, tieRod, upright):
@@ -204,7 +239,12 @@ class Corner:
         result1 = P1 + x * ex + y * ey + z * ez
         result2 = P1 + x * ex + y * ey - z * ez
 
-        return result1 if result1[0] > result2[0] else result2 # this returns the solution where the tie rod is more forward corresponding with rack in front of wheels
+        # this returns the solution where the tie rod is more forward 
+        # corresponding with rack in front of steering axis
+
+        # change this inequality if setting the rack behind the steering axis
+
+        return result1 if result1[0] > result2[0] else result2 
     
     def rigid_transform(original_pos, new_pos): 
         # original and new pos are upper wishbone, lower wishbone, and toe link positions before and after move
@@ -237,7 +277,62 @@ class Corner:
         # Translation
         t = Q_centroid - np.dot(P_centroid, R)
 
-        return R, t #need to apply this rotation and translation to full upright assembly including tire
+        return R, t #apply this rotation and translation to full upright assembly including tire
+
+    def articulate(self, upper_wb_theta, steer_dist):
+        self.wishbone_travel(upper_wb_theta) = 0
+        # need to figure out all the instance variables and how they can be called for this function  
+        pass
+
+    def report_kingpin_inc(self, upper_bj, lower_bj):
+        # kingpin axis vector
+        bj_vec = upper_bj - lower_bj
+
+        # reference vertical vector (pointing up from lower BJ)
+        vertical_vec = np.array([0, 0, 1])
+
+        # define plane normal: mid-plane = xz-plane → normal = y-axis
+        mid_plane_normal = np.array([0, 1, 0], dtype=float)
+        mid_plane_normal /= np.linalg.norm(mid_plane_normal)  # ensure unit normal
+
+        # projection onto plane: v_proj = v - (v·n)n
+        bj_proj = bj_vec - np.dot(bj_vec, mid_plane_normal) * mid_plane_normal
+        vert_proj = vertical_vec - np.dot(vertical_vec, mid_plane_normal) * mid_plane_normal
+
+        # angle between projected vectors
+        cos_theta = np.dot(bj_proj, vert_proj) / (
+            np.linalg.norm(bj_proj) * np.linalg.norm(vert_proj)
+        )
+
+        # numerical safety
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+
+        return np.arccos(cos_theta)
+    
+    def report_caster(self, upper_bj, lower_bj):
+        # kingpin axis vector
+        bj_vec = upper_bj - lower_bj
+
+        # reference vertical vector
+        vertical_vec = np.array([0.0, 0.0, 1.0])
+
+        # plane normal for camber: yz-plane → normal = x-axis
+        plane_normal = np.array([1.0, 0.0, 0.0])
+        plane_normal /= np.linalg.norm(plane_normal)   # ensure unit normal
+
+        # project kingpin axis and vertical vector onto the plane
+        bj_proj = bj_vec - np.dot(bj_vec, plane_normal) * plane_normal
+        vert_proj = vertical_vec - np.dot(vertical_vec, plane_normal) * plane_normal
+
+        # compute camber angle between the two projected vectors
+        cos_theta = np.dot(bj_proj, vert_proj) / (
+            np.linalg.norm(bj_proj) * np.linalg.norm(vert_proj)
+        )
+
+        # numerical stability
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+
+        return np.arccos(cos_theta)
 
 class Rack:
     def __init__(self, right, left, range, rotations):
@@ -250,6 +345,7 @@ class Rack:
     def steer(self, steer_dist):
         # positive steer_dist = left turn
         # negative steer_dist = right turn
+        # matches with global coordinate system
 
         if steer_dist > (self.range/2):
             raise ValueError("steering exceeds rack range")
@@ -260,7 +356,7 @@ class Rack:
 
         return left_rod_end, right_rod_end
     
-    # add another function later to return steering wheel theta as function of rack travel using range and rotations
+    # TODO: add another function later to return steering wheel theta as function of rack travel using range and rotations
     # input: current right or left tie rod pos 
     # output: wheel theta
 
