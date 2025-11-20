@@ -63,7 +63,7 @@ class Wishbone:
         rotated_point = rotated_translated_point + self.rear
         
         # change instance variable of balljoint location
-        # self.balljoint = rotated_point 
+        self.balljoint = rotated_point 
 
         return rotated_point #upright balljoint location
 
@@ -147,10 +147,13 @@ class Upright:
         return rotated_toeLink, rotated_axleTip
     
 class Corner:
-    def __init__(self, upper_wb, lower_wb, upright):
+    def __init__(self, upper_wb, lower_wb, upright, rack, side):
         self.u_wb = upper_wb #wishbone object
         self.l_wb = lower_wb #wishbone object
         self.upright = upright #upright object
+        self.rack = rack #object, steering rack rod ends if front or toe link locations if rear
+        self.side = side # 0  for left, 1 for right
+
 
     def travel_old(self, theta, steps = 1000, theta_range = 20): #manual stepping through fixed theta range
         upper_pos = self.u_wb.rotation(theta) #rotate upper wishbone
@@ -181,7 +184,6 @@ class Corner:
         upper_pos = self.u_wb.rotation(upper_theta)
         joint_dist = self.upright.joint_dist
 
-        # Define the function whose root we want to find
         def f(theta_l):
             lower_pos = self.l_wb.rotation(theta_l)
             dist = jnp.linalg.norm(upper_pos - lower_pos)
@@ -197,19 +199,24 @@ class Corner:
 
         return self.l_wb.rotation(best_theta)
     
-    def toe_link_pos_solve(self, upper_theta, rack_pos, tieRod, upright):
+    def toe_link_pos_solve(self):
         # use "trilaterate" method to find position of toe link on the upright
 
-        #find upper wishbone balljoint pos
-        upper_pos = self.u_wb.rotation(upper_theta)
-        upper_dist = upright.upper_toe_dist
+        #get upper wishbone balljoint pos
+        upper_pos = self.u_wb.balljoint
+        upper_dist = self.upright.upper_toe_dist
         
-        #find lower wishbone balljoint pos
-        lower_pos = self.wishbone_travel(upper_theta)
-        lower_dist = upright.lower_toe_dist
+        #get lower wishbone balljoint pos
+        lower_pos = self.l_wb.balljoint
+        lower_dist = self.upright.lower_toe_dist
 
         #rack_pos gives third point
-        tie_rod_dist = tieRod.length
+        tie_rod_dist = self.rack.tie_rod_length
+
+        if self.side == 0: # left or right side
+            rack_pos = self.rack.left
+        else:
+            rack_pos = self.rack.right
 
         P1, P2, P3 = map(np.array, (upper_pos, lower_pos, rack_pos))
 
@@ -239,7 +246,7 @@ class Corner:
         result1 = P1 + x * ex + y * ey + z * ez
         result2 = P1 + x * ex + y * ey - z * ez
 
-        # this returns the solution where the tie rod is more forward 
+        # this returns the solution for the tie rod link location where the tie rod is more forward 
         # corresponding with rack in front of steering axis
 
         # change this inequality if setting the rack behind the steering axis
@@ -267,7 +274,7 @@ class Corner:
         P_centered = original_pos - P_centroid
         Q_centered = new_pos - Q_centroid
 
-        # Kabsch to find rotation
+        # Kabsch algorithm to find rotation
         H = np.dot(P_centered.T, Q_centered)
         U, S, Vt = np.linalg.svd(H)
         d = np.sign(np.linalg.det(np.dot(Vt.T, U.T)))
@@ -335,12 +342,15 @@ class Corner:
         return np.arccos(cos_theta)
 
 class Rack:
-    def __init__(self, right, left, range, rotations):
+    def __init__(self, right, left, range, rotations, tie_rod_length):
         #lets you make angled and/or off center rack but don't do that
+        #don't articulate the rack to make static toe link locations for the rear
+
         self.right = right #3d point
         self.left = left #3d point
-        self.range = range #distance a tie rod end moves when going from lock to lock, is equal to 2x the distance from centered wheel
-        self.rotations = rotations
+        self.range = range #distance a tie rod end moves when going from lock to lock, is equal to 2x the distance from centered steering wheel
+        self.tie_rod_length = tie_rod_length #meters
+        self.rotations = rotations #steering wheel rotations from lock to lock
 
     def steer(self, steer_dist):
         # positive steer_dist = left turn
@@ -359,8 +369,3 @@ class Rack:
     # TODO: add another function later to return steering wheel theta as function of rack travel using range and rotations
     # input: current right or left tie rod pos 
     # output: wheel theta
-
-class TieRod:
-    # use the same tie rod length for both sides if rack is centered (probably should be)
-    def __init__(self, length):
-        self.length = length
