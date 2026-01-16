@@ -88,6 +88,7 @@ class Upright:
 
         if abs(n[0]) <= abs(n[1]) and abs(n[0]) <= abs(n[2]):
             v = np.array([1, 0, 0])
+
         elif abs(n[1]) <= abs(n[2]):
             v = np.array([0, 1, 0])
         else:
@@ -102,8 +103,7 @@ class Upright:
         t = np.linspace(0, 2*np.pi, n_points)
 
         # wheel points
-        self.wheel_circ = self.axle_root + self.wheel_rad * (np.outer(np.cos(t), u) +
-                                    np.outer(np.sin(t), w))
+        self.wheel_circ = self.axle_root + self.wheel_rad * (np.outer(np.cos(t), u) + np.outer(np.sin(t), w))
         
         # distances for solving rotations
         self.joint_dist = np.linalg.norm(upper_balljoint - lower_balljoint)
@@ -145,6 +145,9 @@ class Upright:
         #set new instance variables
         # self.toe_link = rotated_toeLink
         return rotated_toeLink, rotated_axleTip
+    
+    def upright_pos(self):
+        return self.upper_balljoint, self.lower_balljoint, self.toe_root, self.toe_link, self.axle_root, self.axle_tip
     
 class Corner:
     def __init__(self, upper_wb, lower_wb, upright, rack, side):
