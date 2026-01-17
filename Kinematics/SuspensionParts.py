@@ -15,9 +15,11 @@ Use Kabsch algorithm for rigid body translation + rotation of upright
 class Wishbone:
     def __init__(self, front: np.array, rear: np.array, balljoint: np.array):
         #add rotation limits to restrict travel
-        self.front = front
+        self.front = front # pickup point on chassis
         self.rear = rear
         self.balljoint = balljoint
+        self.balljoint_0 = np.copy(balljoint)  # zero-angle reference
+        self.current_theta = 0     
 
     def axis_of_rot(self):
         vec = self.front - self.rear
@@ -32,7 +34,8 @@ class Wishbone:
     def balljoint_pos(self):
         return self.balljoint
     
-    def rotation(self, theta):
+    def rotation(self, theta): #move by angle theta
+        
         axis = self.axis_of_rot()
 
         translated_point = self.balljoint - self.rear
@@ -66,6 +69,26 @@ class Wishbone:
         self.balljoint = rotated_point 
 
         return rotated_point #upright balljoint location
+    
+    def set_angle(self, theta):
+        """
+        Sets the wishbone to an absolute angle theta (radians)
+        relative to the initial zero-angle position.
+        """
+        # Determine the rotation needed from zero-angle
+        delta_theta = theta - getattr(self, "current_theta", 0)
+
+        # Temporarily reset balljoint to zero position
+        self.balljoint = np.copy(self.balljoint_0)
+
+        # Rotate by delta_theta using your existing rotation method
+        self.rotation(delta_theta)
+
+        # Update current angle
+        self.current_theta = theta
+
+        return self.balljoint
+
 
 class Upright:
     def __init__(self, upper_balljoint, lower_balljoint, toe_root, toe_link, axle_root, axle_tip, wheel_rad):
@@ -77,6 +100,11 @@ class Upright:
         self.lower_balljoint = lower_balljoint
         self.toe_root = toe_root
         self.toe_link = toe_link
+
+        #0 positions of joints
+        self.upper_balljoint_0 = np.copy(upper_balljoint)
+        self.lower_balljoint_0 = np.copy(lower_balljoint)
+        self.toe_link_0 = np.copy(toe_link)
 
         #wheel geometry
         self.axle_root = axle_root # put this on centerline of wheel
@@ -177,30 +205,30 @@ class Corner:
 
         return self.l_wb.rotation(theta_close) #return lower balljoint position that maintains upper/lower balljoint distance
     
-    def wishbone_travel(self, upper_theta, theta_bounds=(-0.5, 0.5)):
+    def wishbone_travel(self, upper_theta):# , theta_bounds=(-0.5, 0.5)):
         """
         Solve for lower wishbone theta such that the distance between upper and
         lower balljoints equals the upright joint distance.
         """
 
         # Fixed position of upper balljoint
-        upper_pos = self.u_wb.rotation(upper_theta)
+        upper_pos = self.u_wb.set_angle(upper_theta)
         joint_dist = self.upright.joint_dist
 
         def f(theta_l):
-            lower_pos = self.l_wb.rotation(theta_l)
+            lower_pos = self.l_wb.set_angle(theta_l)
             dist = jnp.linalg.norm(upper_pos - lower_pos)
             return dist - joint_dist
 
         # Use root-finding to solve f(theta) = 0
-        result = root_scalar(f, method='brentq', bracket=theta_bounds)
+        result = root_scalar(f, method='brentq')# , bracket=theta_bounds)
 
         if not result.converged:
             raise RuntimeError("Failed to solve for lower wishbone theta")
 
         best_theta = result.root
 
-        return self.l_wb.rotation(best_theta)
+        return self.l_wb.set_angle(best_theta)
     
     def toe_link_pos_solve(self):
         # use "trilaterate" method to find position of toe link on the upright
@@ -257,7 +285,10 @@ class Corner:
         return result1 if result1[0] > result2[0] else result2 
     
     def rigid_transform(original_pos, new_pos): 
-        # original and new pos are upper wishbone, lower wishbone, and toe link positions before and after move
+        # original and new pos are upper wishbone, lower wishbone, and toe link positions before and after move, (9 total values each)
+        # for moving wheel/tire after suspension is articulated
+
+        #TODO: need a 0 position to work with the set angle functions instead of the incremental moves
         """
         Computes the rigid transformation (rotation + translation) that aligns P to Q.
 
@@ -290,9 +321,23 @@ class Corner:
         return R, t #apply this rotation and translation to full upright assembly including tire
 
     def articulate(self, upper_wb_theta, steer_dist):
-        self.wishbone_travel(upper_wb_theta) = 0
-        # need to figure out all the instance variables and how they can be called for this function  
-        pass
+        #given upper wb angle, find lower wb angle. this line updates the state variables in the upper/lower wb objects
+        self.wishbone_travel(upper_wb_theta)
+
+        upper_wb = self.u_wb
+        lower_wb = self.l_wb
+        toe_link = self.toe_link_pos_solve() #solve for toe link position
+        new_pos = upper_wb, lower_wb, toe_link
+        #add this thing that can be called from the upright later: upright_0 = self.upright_0
+        R, t = self.rigid_transform(upright_0, new_pos)
+
+        #transform wheel pos and upright pos(? maybe upright already done by this point)
+
+        #poll kingpin, camber, caster, steering rack pos, a wb position/ travel %, toe, 
+        
+        
+        #   
+        return
 
     def report_kingpin_inc(self, upper_bj, lower_bj):
         # kingpin axis vector
