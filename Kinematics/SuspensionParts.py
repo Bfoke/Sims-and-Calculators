@@ -230,7 +230,7 @@ class Corner:
 
         return np.arccos(cos_theta)
     
-    def camber_from_axle(axle_dir):
+    def report_camber_from_axle(axle_dir):
         n = axle_dir / np.linalg.norm(axle_dir)
 
         # project into YZ plane (remove X component)
@@ -250,7 +250,7 @@ class Corner:
         sign = -np.sign(n[1])
         return sign * camber
 
-    def steer_from_axle(axle_dir):
+    def report_toe_from_axle(axle_dir):
         n = axle_dir / np.linalg.norm(axle_dir)
 
         # project into XY plane (remove Z component)
@@ -263,9 +263,9 @@ class Corner:
         cross = np.cross(y, n_xy)
         dot = np.dot(y, n_xy)
 
-        steer = np.arctan2(cross[2], dot)
+        toe = np.arctan2(cross[2], dot)
 
-        return steer
+        return toe
 
 def rigid_transform(original_pos, new_pos): 
 
@@ -300,16 +300,6 @@ def rigid_transform(original_pos, new_pos):
 
         return R, t
 
-def axis_of_rot(P1, P2): #helper function for rotation
-        vec = P1 - P2
-        mag = np.linalg.norm(vec)
-
-        if mag == 0:
-            raise ValueError("axis_of_rot unit vec length = 0")
-        
-        unit_vec = vec / mag
-        return unit_vec
-
 def lower_wb_solve(u_wb: Wishbone, l_wb: Wishbone, upright: Upright, upper_theta):
     """
     Pure solver for lower wishbone.
@@ -336,7 +326,7 @@ def solve_toe_link(
     upper_toe_dist,
     lower_toe_dist,
     tie_rod_length,
-    prefer_forward=True
+    forward_rack=True
 ):
     """
     Solve toe link position by trilateration.
@@ -382,7 +372,7 @@ def solve_toe_link(
     sol2 = P1 + x * ex + y * ey - z * ez
 
     # Physical solution selection
-    if prefer_forward:
+    if forward_rack:
         return sol1 if sol1[0] > sol2[0] else sol2
     else:
         return sol1 if sol1[0] < sol2[0] else sol2
@@ -391,58 +381,65 @@ def solve_corner(
     upper_theta, #radians
     steer, #meters
     corner_geom: Corner,   # contains u_wb, l_wb, upright, rack
-    chassis_R=np.eye(3),
-    chassis_t=np.zeros(3)
 ):
     """
-    Returns all balljoints, toe link, and wheel geometry in world frame.
+    Returns all balljoints, toe link, and wheel geometry in chassis frame.
     """
     u_wb = corner_geom.u_wb
     l_wb = corner_geom.l_wb
     upright = corner_geom.upright
     rack = corner_geom.rack
 
-    # Upper and lower wishbone
+    # set upper and lower wishbones
     upper_bj = u_wb.balljoint_pos(upper_theta)
     _, lower_bj = lower_wb_solve(u_wb, l_wb, upright, upper_theta)
 
-    # Rack steering
+    # set steering rack (do nothing for rear)
     if corner_geom.side == 0:
         rack_pos = rack.left_0 + np.array([0, steer, 0])
     else:
         rack_pos = rack.right_0 + np.array([0, steer, 0])
 
-    # Toe link
-    toe_link = solve_toe_link(upper_bj, lower_bj, upright, rack_pos)
+    # solve for toe link given wishbone balljoints and rack position
+    toe_link = solve_toe_link(upper_bj, lower_bj, rack_pos, upright.upper_toe_dist, upright.lower_toe_dist, rack.tie_rod_length)
 
-    # Apply chassis pose
-    upper_bj_w = chassis_R @ upper_bj + chassis_t
-    lower_bj_w = chassis_R @ lower_bj + chassis_t
-    toe_link_w = chassis_R @ toe_link + chassis_t
+    #transform upright/ wheel positions to fit new position
+    # Upright reference points (local / zero pose)
+    P0 = np.vstack([
+        upright.upper_balljoint_0,
+        upright.lower_balljoint_0,
+        upright.toe_link_0,
+    ])
 
-    # Axle (wheel) vector
-    axle_root_0 = upright.axle_root
-    axle_tip_0 = upright.axle_tip
-    axle_root_w = chassis_R @ axle_root_0 + chassis_t
-    axle_tip_w = chassis_R @ axle_tip_0 + chassis_t
-    axle_dir_w = axle_tip_w - axle_root_w
-    axle_dir_w /= np.linalg.norm(axle_dir_w)
+    # Upright solved points (current pose)
+    P1 = np.vstack([
+        upper_bj,
+        lower_bj,
+        toe_link,
+    ])
 
-    # Wheel lowest point
-    wheel_center = axle_root_w
-    wheel_radius = upright.wheel_rad
-    g = np.array([0.0, 0.0, -1.0])
-    n = axle_dir_w
-    d = g - np.dot(g, n) * n
-    mag = np.linalg.norm(d)
+    R_upright, t_upright = rigid_transform(P0, P1)
+
+    axle_root = R_upright @ upright.axle_root + t_upright
+    axle_tip  = R_upright @ upright.axle_tip  + t_upright
+    axle_dir  = axle_tip - axle_root
+    axle_dir /= np.linalg.norm(axle_dir)
+
+    # Wheel lowest point / contact point
+    wheel_center = axle_root
+    wheel_radius = upright.wheel_rad 
+    g = np.array([0.0, 0.0, -1.0]) 
+    n = axle_dir
+    d = g - np.dot(g, n) * n 
+    mag = np.linalg.norm(d) 
     contact_point = wheel_center + (wheel_radius * d / mag if mag > 1e-9 else np.array([0,0,-wheel_radius]))
 
     return {
-        "upper_bj": upper_bj_w,
-        "lower_bj": lower_bj_w,
-        "toe_link": toe_link_w,
-        "axle_root": axle_root_w,
-        "axle_dir": axle_dir_w,
+        "upper_bj": upper_bj,
+        "lower_bj": lower_bj,
+        "toe_link": toe_link,
+        "axle_root": axle_root,
+        "axle_dir": axle_dir,
         "wheel_center": wheel_center,
-        "contact_point": contact_point,
+        "contact_point": contact_point
     }
