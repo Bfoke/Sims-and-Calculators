@@ -1,0 +1,116 @@
+# Chassis Coordinate System:
+# Origin at center of rear axle on ground plane
+# X - Forward
+# Y - Left
+# Z - Up
+
+# Suspension Geometry for Front Right (FR)
+front_right:
+  # Chassis Pickups (Fixed)
+  upper_wishbone:
+    front: [1.7916, -0.2597, 0.3157]  # [X, Y, Z]
+    rear:  [1.5221, -0.2597, 0.3157]
+    balljoint_0: [1.511, -0.5332, 0.3213] # Initial position
+
+  lower_wishbone:
+    front: [1.7916, -0.2216, 0.1354]
+    rear:  [1.5221, -0.2216, 0.1354]
+    balljoint_0: [1.5367, -0.5629, 0.1338]
+
+  # Upright/Knuckle Geometry
+  upright:
+    upper_balljoint_0: [1.511, -0.5332, 0.3213]
+    lower_balljoint_0: [1.5367, -0.5629, 0.1338]
+
+    #left off here
+    
+    toe_link_0: [0.100, 0.680, 0.150]
+    axle_root_0: [0.225, 0.720, 0.190]
+    axle_tip_0: [0.225, 0.820, 0.190]
+    wheel_radius: 0.254 # 10 inches
+
+  # Steering/Toe Constraints
+  steering:
+    rack_end_0: [0.100, 0.300, 0.150]
+    tie_rod_length: 0.385
+
+# Suspension Geometry for Front Left (FL)
+front_left:
+  # Chassis Pickups (Fixed)
+  upper_wishbone:
+    front: [0.350, 0.400, 0.250]  # [X, Y, Z]
+    rear:  [0.100, 0.400, 0.240]
+    balljoint_0: [0.225, 0.650, 0.280] # Initial position
+
+  lower_wishbone:
+    front: [0.350, 0.350, 0.100]
+    rear:  [0.100, 0.350, 0.090]
+    balljoint_0: [0.225, 0.700, 0.110]
+
+  # Upright/Knuckle Geometry (Relative to balljoints)
+  upright:
+    upper_balljoint_0: [0.225, 0.650, 0.280]
+    lower_balljoint_0: [0.225, 0.700, 0.110]
+    toe_link_0: [0.100, 0.680, 0.150]
+    axle_root_0: [0.225, 0.720, 0.190]
+    axle_tip_0: [0.225, 0.820, 0.190]
+    wheel_radius: 0.254 # 10 inches
+
+  # Steering/Toe Constraints
+  steering:
+    rack_end_0: [0.100, 0.300, 0.150]
+    tie_rod_length: 0.385
+
+# Suspension Geometry for Rear Right (RR)
+rear_right:
+  # Chassis Pickups (Fixed)
+  upper_wishbone:
+    front: [0.350, 0.400, 0.250]  # [X, Y, Z]
+    rear:  [0.100, 0.400, 0.240]
+    balljoint_0: [0.225, 0.650, 0.280] # Initial position
+
+  lower_wishbone:
+    front: [0.350, 0.350, 0.100]
+    rear:  [0.100, 0.350, 0.090]
+    balljoint_0: [0.225, 0.700, 0.110]
+
+  # Upright/Knuckle Geometry (Relative to balljoints)
+  upright:
+    upper_balljoint_0: [0.225, 0.650, 0.280]
+    lower_balljoint_0: [0.225, 0.700, 0.110]
+    toe_link_0: [0.100, 0.680, 0.150]
+    axle_root_0: [0.225, 0.720, 0.190]
+    axle_tip_0: [0.225, 0.820, 0.190]
+    wheel_radius: 0.254 # 10 inches
+
+  # Steering/Toe Constraints
+  steering:
+    rack_end_0: [0.100, 0.300, 0.150]
+    tie_rod_length: 0.385
+
+# Suspension Geometry for Rear Left (RL)
+rear_left:
+  # Chassis Pickups (Fixed)
+  upper_wishbone:
+    front: [0.350, 0.400, 0.250]  # [X, Y, Z]
+    rear:  [0.100, 0.400, 0.240]
+    balljoint_0: [0.225, 0.650, 0.280] # Initial position
+
+  lower_wishbone:
+    front: [0.350, 0.350, 0.100]
+    rear:  [0.100, 0.350, 0.090]
+    balljoint_0: [0.225, 0.700, 0.110]
+
+  # Upright/Knuckle Geometry (Relative to balljoints)
+  upright:
+    upper_balljoint_0: [0.225, 0.650, 0.280]
+    lower_balljoint_0: [0.225, 0.700, 0.110]
+    toe_link_0: [0.100, 0.680, 0.150]
+    axle_root_0: [0.225, 0.720, 0.190]
+    axle_tip_0: [0.225, 0.820, 0.190]
+    wheel_radius: 0.254 # 10 inches
+
+  # Steering/Toe Constraints
+  steering:
+    rack_end_0: [0.100, 0.300, 0.150]
+    tie_rod_length: 0.385

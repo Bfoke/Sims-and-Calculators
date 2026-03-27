@@ -67,7 +67,7 @@ class Wishbone:
         # translate back to the original coordinate system
         rotated_point = rotated_translated_point + self.rear_local
 
-        return rotated_point #upright balljoint location
+        return rotated_point #new upright balljoint location
     
 class Rack:
     def __init__(self, right_local, left_local, range, rotations, tie_rod_length):

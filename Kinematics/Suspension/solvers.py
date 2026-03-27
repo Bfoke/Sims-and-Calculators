@@ -2,6 +2,7 @@ import numpy as np
 from .geometry import Wishbone, Upright, Wheel, Rack, Corner, Chassis
 import jax.numpy as jnp
 from scipy.optimize import root_scalar
+import jax
 
 '''
 
@@ -55,7 +56,10 @@ def rigid_transform(original_pos, new_pos):
 
 def lower_wb_solve(u_wb: Wishbone, l_wb: Wishbone, upright: Upright, upper_theta):
     """
-    Pure solver for lower wishbone.
+    Solves for lower wishbone balljoint position and the rotation angle from initial position
+    based on setting the upper wishbone/ balljoint in position and maintaining distance 
+    defined by upright
+
     Returns lower_theta and lower_balljoint_pos.
     """
     upper_pos = u_wb.set_balljoint_pos(upper_theta)
@@ -84,8 +88,8 @@ def solve_toe_link(
     """
     Solve toe link position by trilateration.
 
-    All inputs are 3D numpy arrays in the same frame.
-    Returns the physically valid toe link position.
+    All inputs are 3x1 numpy arrays in the same frame.
+    Returns the toe link position.
     """
 
     P1 = np.asarray(upper_bj)
@@ -130,6 +134,65 @@ def solve_toe_link(
     else:
         return sol1 if sol1[0] < sol2[0] else sol2
     
+def solve_toe_link_jax(
+    upper_bj,
+    lower_bj,
+    rack_pos,
+    upper_toe_dist,
+    lower_toe_dist,
+    tie_rod_length,
+    forward_rack=True
+):
+    """
+    Solve toe link position by trilateration.
+
+    All inputs are 3D numpy arrays in the same frame.
+    Returns the physically valid toe link position.
+    """
+
+    P1 = jnp.asarray(upper_bj)
+    P2 = jnp.asarray(lower_bj)
+    P3 = jnp.asarray(rack_pos)
+
+    # Basis construction
+    ex = P2 - P1
+    d = jnp.linalg.norm(ex)
+    if d == 0:
+        raise ValueError("Upper and lower ball joints coincide")
+
+    ex /= d
+
+    i = jnp.dot(ex, P3 - P1)
+    temp = P3 - P1 - i * ex
+    temp_norm = jnp.linalg.norm(temp)
+    if temp_norm == 0:
+        raise ValueError("Rack lies on BJ axis")
+
+    ey = temp / temp_norm
+    ez = jnp.cross(ex, ey)
+
+    j = jnp.dot(ey, P3 - P1)
+
+    # Coordinates in this frame
+    x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
+    y = (upper_toe_dist**2 - tie_rod_length**2 + i**2 + j**2 - 2 * i * x) / (2 * j)
+
+    z_sq = upper_toe_dist**2 - x**2 - y**2
+
+    if z_sq < 0:
+        raise ValueError("No real toe-link solution")
+
+    z = jnp.sqrt(z_sq)
+
+    sol1 = P1 + x * ex + y * ey + z * ez
+    sol2 = P1 + x * ex + y * ey - z * ez
+
+    # Physical solution selection
+    if forward_rack:
+        return sol1 if sol1[0] > sol2[0] else sol2
+    else:
+        return sol1 if sol1[0] < sol2[0] else sol2
+    
 def solve_corner(
     upper_theta, #radians
     steer, #meters
@@ -158,6 +221,7 @@ def solve_corner(
 
     #transform upright/ wheel positions to fit new position
     # Upright reference points (local / zero pose)
+
     P0 = np.vstack([
         upright.upper_balljoint_0,
         upright.lower_balljoint_0,
@@ -197,9 +261,11 @@ def solve_corner(
         "contact_point": contact_point
     }
 
-##############################################
-# Functions for evaluating suspension geometry
-##############################################
+
+
+################################################
+# Functions for evaluating suspension geometry #
+################################################
 
 def project_YZ(p):
     """Project 3D point into front view (YZ plane)."""
@@ -228,11 +294,86 @@ def line_intersection_2d(p1, p2, p3, p4):
 
     return np.array([px, py])
 
-def front_view_instant_center(u_wb: Wishbone, l_wb: Wishbone,
-                              upper_bj, lower_bj):
+def calculate_isa_exact(upper_theta, steer, corner_geom):
+    """
+    Calculates the exact 3D Screw Axis using Automatic Differentiation.
+    """
+    
+    # 1. Define a helper that returns the positions we care about
+    def upright_positions(theta):
+        res = solve_corner(theta, steer, corner_geom) # Ensure this uses jnp internally
+        return jnp.stack([res["upper_bj"], res["lower_bj"], res["toe_link"]])
+
+    # 2. Compute the Jacobian (The 'velocity' of the points w.r.t. theta)
+    # jac shape: (3 points, 3 coordinates) -> (3, 3)
+
+    jac_fn = jax.jacobian(upright_positions)
+    velocities = jac_fn(upper_theta)
+    
+    # Current positions
+    pos = upright_positions(upper_theta)
+    
+    p1, p2 = pos[0], pos[1]
+    v1, v2 = velocities[0], velocities[1]
+
+    # 3. Solve for Angular Velocity vector (omega)
+    # v2 - v1 = omega x (p2 - p1)
+    r12 = p2 - p1
+    v12 = v2 - v1
+    
+    # omega = (r12 x v12) / |r12|^2
+    omega = jnp.cross(r12, v12) / jnp.dot(r12, r12)
+    omega_mag_sq = jnp.dot(omega, omega)
+    
+    # 4. Extract Screw Parameters
+    # Direction unit vector
+    s = omega / jnp.sqrt(omega_mag_sq)
+    
+    # Pitch (h): component of linear velocity along the rotation axis
+    h = jnp.dot(v1, omega) / omega_mag_sq
+    
+    # Point on Axis (q): Point closest to origin
+    q = jnp.cross(omega, v1) / omega_mag_sq
+
+    return q, s, h
+
+def intersect_line_plane(l1, l2, p1, p2, p3):
+
+    # Convert inputs to numpy arrays
+    l1, l2 = np.array(l1), np.array(l2)
+    p1, p2, p3 = np.array(p1), np.array(p2), np.array(p3)
+    
+    # 1. Define the line vector
+    line_vec = l2 - l1
+    
+    # 2. Define the plane normal vector
+    v1 = p2 - p1
+    v2 = p3 - p1
+    normal = np.cross(v1, v2)
+    
+    # Check if line and plane are parallel
+    dot_product = np.dot(normal, line_vec)
+    
+    if abs(dot_product) < 1e-6:
+        return None  # No intersection or line lies on the plane
+    
+    # 3. Calculate the parameter t
+    # Formula: t = (normal . (p1 - l1)) / (normal . line_vec)
+    w = p1 - l1
+    t = np.dot(normal, w) / dot_product
+    
+    # 4. Calculate the intersection point
+    intersection = l1 + t * line_vec
+    return intersection
+
+def front_view_instant_center(wheel_center, contact_point, u_wb: Wishbone, l_wb: Wishbone, upper_bj, lower_bj):
     """
     Returns IC in chassis frame (3D).
     """
+    # TODO: rewrite this to use points on plane defined by center line of tire and forward vector, 
+    # then project balljoints onto that plane
+
+    # uses 2d assumptions
 
     # Upper arm line (projected)
     u_in = project_YZ(u_wb.front_local)
@@ -246,8 +387,46 @@ def front_view_instant_center(u_wb: Wishbone, l_wb: Wishbone,
     if ic_yz is None:
         return None
 
-    # Back to 3D (X arbitrary → use 0)
+    # Back to 3D (X is arbitrary so use 0)
     return np.array([0.0, ic_yz[0], ic_yz[1]])
+
+def get_3d_roll_center(q, s, contact_point, wheel_center_x):
+    """
+    Maps the 3D ISA to a Roll Center height.
+    q: Point on ISA
+    s: Direction of ISA
+    contact_point: [x, y, z] of tire contact
+    wheel_center_x: The X-coordinate of the plane we are analyzing (usually axle line)
+    """
+    
+    # 1. Find intersection of ISA line with the YZ plane at X = wheel_center_x
+    # Line equation: P = q + t*s
+    # We want P.x = wheel_center_x
+    # wheel_center_x = q.x + t*s.x  => t = (wheel_center_x - q.x) / s.x
+    
+    if abs(s[0]) < 1e-9:
+        # Axis is parallel to the YZ plane (pure longitudinal anti-squat/dive)
+        # In this case, use the projection of the axis
+        ic_3d = np.array([wheel_center_x, q[1], q[2]])
+    else:
+        t = (wheel_center_x - q[0]) / s[0]
+        ic_3d = q + t * s
+
+    # 2. Project everything to the Front View (YZ Plane)
+    cp_yz = contact_point[1:] # [y, z]
+    ic_yz = ic_3d[1:]        # [y, z]
+    
+    # 3. Intersection with Y=0 (Chassis Centerline)
+    # Line through (y1, z1) and (y2, z2): 
+    # z - z1 = ((z2 - z1) / (y2 - y1)) * (y - y1)
+    # At y = 0: z = z1 - y1 * ((z2 - z1) / (y2 - y1))
+    
+    y1, z1 = cp_yz
+    y2, z2 = ic_yz
+    
+    rc_height = z1 - y1 * ((z2 - z1) / (y2 - y1))
+    
+    return rc_height
 
 def roll_center_from_two_corners(
     ic_left, contact_left,
@@ -257,7 +436,7 @@ def roll_center_from_two_corners(
     True geometric roll center:
     intersection of force lines from contact patches to instant centers
     """
-
+    # uses 2D assumptions
     if ic_left is None or ic_right is None:
         return None
 
@@ -274,7 +453,7 @@ def roll_center_from_two_corners(
 
     return np.array([0.0, rc_yz[0], rc_yz[1]])
 
-def report_kingpin_inc(upper_bj, lower_bj): 
+def report_kingpin_inc(upper_bj: np.array, lower_bj: np.array): 
         
         # kingpin axis vector
         bj_vec = upper_bj - lower_bj

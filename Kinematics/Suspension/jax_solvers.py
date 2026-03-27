@@ -1,0 +1,476 @@
+import jax.numpy as jnp
+import jax
+
+'''
+
+Chassis Coordinate System:
+Origin at center of rear axle on ground plane
+X - Forward
+Y - Left
+Z - Up
+
+all local positions are in chassis frame coordinates
+all unlabeled positions are in world frame coordinates
+
+'''
+
+################################################
+# Functions for manipulating geometry
+################################################
+
+def axis_of_rot(A: jnp.array, B: jnp.array): 
+    """helper function for rotate point function"""
+
+    vec = A - B
+    mag = jnp.linalg.norm(vec)
+
+    if mag == 0:
+        raise ValueError("axis_of_rot unit vec length = 0")
+    
+    unit_vec = vec / mag
+    return unit_vec
+
+def rotate_point(point: jnp.array, theta: float, A: jnp.array, B: jnp.array): 
+    # move by angle theta from initialized position
+    # return position in chassis frame
+    axis = axis_of_rot(A, B)
+
+    translated_point = point - B
+    
+    ux, uy, uz = axis
+    cos_t = jnp.cos(theta)
+    sin_t = jnp.sin(theta)
+    one_minus_cos = 1 - cos_t
+
+    R = jnp.array([
+        [cos_t + ux**2 * one_minus_cos,
+        ux * uy * one_minus_cos - uz * sin_t,
+        ux * uz * one_minus_cos + uy * sin_t],
+
+        [uy * ux * one_minus_cos + uz * sin_t,
+        cos_t + uy**2 * one_minus_cos,
+        uy * uz * one_minus_cos - ux * sin_t],
+
+        [uz * ux * one_minus_cos - uy * sin_t,
+        uz * uy * one_minus_cos + ux * sin_t,
+        cos_t + uz**2 * one_minus_cos]
+    ])
+
+    # rotate the translated point
+    rotated_translated_point = R @ translated_point
+
+    # translate back to the original coordinate system
+    rotated_point = rotated_translated_point + B
+
+    return rotated_point #new upright balljoint location
+
+def rigid_transform_jax(original_pos, new_pos): 
+
+        """
+        Computes the rigid transformation (rotation + translation) that aligns P to Q.
+
+        Parameters:
+            P: (3, 3) numpy array of source points
+            Q: (3, 3) numpy array of destination points
+
+        Returns:
+            R: (3, 3) rotation matrix
+            t: (3,) translation vector
+        """
+        # Centroids
+        P_centroid = jnp.mean(original_pos, axis=0)
+        Q_centroid = jnp.mean(new_pos, axis=0)
+
+        # Center the point sets
+        P_centered = original_pos - P_centroid
+        Q_centered = new_pos - Q_centroid
+
+        # Kabsch algorithm to find rotation
+        H = jnp.dot(P_centered.T, Q_centered)
+        U, S, Vt = jnp.linalg.svd(H)
+        d = jnp.sign(jnp.linalg.det(jnp.dot(Vt.T, U.T)))
+        D = jnp.diag([1, 1, d])
+        R = jnp.dot(Vt.T, jnp.dot(D, U.T))
+
+        # Translation
+        t = Q_centroid - jnp.dot(P_centroid, R)
+
+        return R, t
+
+def lower_wb_solve_jax(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
+    """
+    Find lower wishbone angle/position that fits with an upper wishbone position
+    """
+    def get_l_bj(theta):
+        # Rodrigues rotation formula
+        translated = l_wb_bj_0 - l_wb_origin
+        cos_t = jnp.cos(theta)
+        sin_t = jnp.sin(theta)
+        dot = jnp.dot(l_wb_axis, translated)
+        cross = jnp.cross(l_wb_axis, translated)
+        rotated = translated * cos_t + cross * sin_t + l_wb_axis * dot * (1 - cos_t)
+        return rotated + l_wb_origin
+
+    def f(theta):
+        l_bj = get_l_bj(theta)
+        return jnp.linalg.norm(u_wb_bj - l_bj) - joint_dist
+
+    # Newton-Raphson method
+    theta = 0.0  # Initial guess
+    for _ in range(10):  
+        f_val, f_grad = jax.value_and_grad(f)(theta)
+        theta = theta - f_val / f_grad
+    
+    return theta, get_l_bj(theta)
+
+def solve_toe_link_jax(
+    upper_bj,
+    lower_bj,
+    rack_pos,
+    upper_toe_dist,
+    lower_toe_dist,
+    tie_rod_length,
+    forward_rack=True
+):
+    """
+    Solve for toe link position given upper balljoint, lower balljoint, and rack position.
+
+    All inputs are 3D jax arrays in the same frame.
+    Returns the physically valid toe link position.
+    """
+
+    P1 = jnp.asarray(upper_bj)
+    P2 = jnp.asarray(lower_bj)
+    P3 = jnp.asarray(rack_pos)
+
+    # Basis construction
+    ex = P2 - P1
+    d = jnp.linalg.norm(ex)
+    if d == 0:
+        raise ValueError("Upper and lower ball joints coincide")
+
+    ex /= d
+
+    i = jnp.dot(ex, P3 - P1)
+    temp = P3 - P1 - i * ex
+    temp_norm = jnp.linalg.norm(temp)
+    if temp_norm == 0:
+        raise ValueError("Rack lies on BJ axis")
+
+    ey = temp / temp_norm
+    ez = jnp.cross(ex, ey)
+
+    j = jnp.dot(ey, P3 - P1)
+
+    # Coordinates in this frame
+    x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
+    y = (upper_toe_dist**2 - tie_rod_length**2 + i**2 + j**2 - 2 * i * x) / (2 * j)
+
+    z_sq = upper_toe_dist**2 - x**2 - y**2
+
+    if z_sq < 0:
+        raise ValueError("No real toe-link solution")
+
+    z = jnp.sqrt(z_sq)
+
+    sol1 = P1 + x * ex + y * ey + z * ez
+    sol2 = P1 + x * ex + y * ey - z * ez
+
+    # Physical solution selection
+    if forward_rack:
+        return sol1 if sol1[0] > sol2[0] else sol2
+    else:
+        return sol1 if sol1[0] < sol2[0] else sol2
+    
+def solve_corner_jax(upper_theta: float, steer: float, params):
+    """
+    The 'Differentiable' version of your solve_corner.
+    'params' is a dictionary of all hardpoints as JAX arrays.
+    """
+    # 1. Upper BJ Position
+    u_bj = rotate_point(params['u_front'], params['u_axis'], params['u_bj_0'], upper_theta)
+    
+    # 2. Lower BJ Position
+    _, l_bj = lower_wb_solve_jax(u_bj, params['l_rear'], params['l_axis'], params['l_bj_0'], params['joint_dist'])
+    
+    # 3. Toe Link position for upright and rack/toe pickup point position
+    toe_link = solve_toe_link_jax(u_bj, l_bj, params['rack_origin'], steer)
+    
+    return jnp.stack([u_bj, l_bj, toe_link])
+
+################################################
+# Functions for evaluating suspension geometry #
+################################################
+
+def project_YZ(p: jnp.array):
+    """Project 3D point into front view (YZ plane)."""
+    return jnp.array([p[1], p[2]])  # (Y, Z)
+
+def project_XZ(p: jnp.array):
+    """Project 3D point onto side view XZ plane"""
+    return jnp.array(p[0], p[2]) # X, Z
+
+def project_XY(p: jnp.array):
+    """Project 3D point onto top view XY plane"""
+    return jnp.array(p[0], p[1]) # X, Y
+
+def report_toe(axle_dir: jnp.array):
+
+    """find toe angle given axle direction vector"""
+
+    # report toe in chassis frame, only works if car is facing positive X direction
+    # TODO: add chassis R and T to compensate for chassis pose and report toe relative to chassis body not the axis
+
+    n = axle_dir / jnp.linalg.norm(axle_dir)
+
+    # project into XY plane (remove Z component)
+    n_xy = project_XY(n)
+
+    # reference lateral direction (left)
+    y = jnp.array([0.0, 1.0])
+
+    # signed angle using atan2
+    cross = jnp.cross(y, n_xy)
+    dot = jnp.dot(y, n_xy)
+
+    toe = jnp.arctan2(cross[2], dot)
+
+    return toe
+
+def report_camber(axle_dir: jnp.array):
+
+    """find camber angle given axle direction vector"""
+
+    # report camber in chassis frame or world frame depending on which axle_dir is passed
+    # TODO: add ability to pass in world frame R and t matrices so can get camber in world frame
+    n = axle_dir / jnp.linalg.norm(axle_dir)
+
+    # project into YZ plane (remove X component)
+    n_yz = jnp.array([0.0, n[1], n[2]])
+
+    # reference vertical
+    z = jnp.array([0.0, 0.0, 1.0])
+
+    # angle magnitude
+    cos_camber = jnp.dot(n_yz, z) / (
+        jnp.linalg.norm(n_yz) * jnp.linalg.norm(z)
+    )
+    camber = jnp.arccos(jnp.clip(cos_camber, -1.0, 1.0))
+
+    # sign: negative camber = top of wheel inboard
+    # left side: +Y is outboard
+    sign = -jnp.sign(n[1])
+    return sign * camber
+
+def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
+
+    """find caster angle given balljoint positions"""
+
+    # only valid if vehicle pose is on ground and facing positive X direction
+    # TODO: add chassis R and T to make it always valid
+    bj_vec = upper_bj - lower_bj
+
+    # reference vertical vector
+    vertical_vec = jnp.array([0.0, 0.0, 1.0])
+
+    # plane normal for camber: yz-plane → normal = x-axis
+    plane_normal = jnp.array([1.0, 0.0, 0.0])
+    plane_normal /= jnp.linalg.norm(plane_normal)   # ensure unit normal
+
+    # project kingpin axis and vertical vector onto the plane
+    bj_proj = bj_vec - jnp.dot(bj_vec, plane_normal) * plane_normal
+    vert_proj = vertical_vec - jnp.dot(vertical_vec, plane_normal) * plane_normal
+
+    # compute camber angle between the two projected vectors
+    cos_theta = jnp.dot(bj_proj, vert_proj) / (
+        jnp.linalg.norm(bj_proj) * jnp.linalg.norm(vert_proj)
+    )
+
+    # numerical stability
+    cos_theta = jnp.clip(cos_theta, -1.0, 1.0)
+
+    return jnp.arccos(cos_theta)
+
+def report_kingpin_inc(upper_bj: jnp.array, lower_bj: jnp.array):
+
+    """find kingpin inclination given upper and lower balljoint positions"""
+
+    # kingpin axis vector
+    bj_vec = upper_bj - lower_bj
+
+    # reference vertical vector (pointing up from lower BJ)
+    vertical_vec = jnp.array([0, 0, 1])
+
+    # define plane normal: mid-plane = xz-plane → normal = y-axis
+    mid_plane_normal = jnp.array([0, 1, 0], dtype=float)
+    mid_plane_normal /= jnp.linalg.norm(mid_plane_normal)  # ensure unit normal
+
+    # projection onto plane: v_proj = v - (v·n)n
+    bj_proj = bj_vec - jnp.dot(bj_vec, mid_plane_normal) * mid_plane_normal
+    vert_proj = vertical_vec - jnp.dot(vertical_vec, mid_plane_normal) * mid_plane_normal
+
+    # angle between projected vectors
+    cos_theta = jnp.dot(bj_proj, vert_proj) / (
+        jnp.linalg.norm(bj_proj) * jnp.linalg.norm(vert_proj)
+    )
+
+    # numerical safety
+    cos_theta = jnp.clip(cos_theta, -1.0, 1.0)
+
+    return jnp.arccos(cos_theta)
+
+def report_scrub_radius(upper_bj: jnp.array, lower_bj: jnp.array, contact_point: jnp.array, axle_dir: jnp.array):
+    """
+    Calculates Scrub Radius: The lateral distance between the 
+    contact patch and the kingpin axis intersection with the ground.
+    """
+    # Define the steering axis Line: P = lower_bj + t * (upper_bj - lower_bj)
+    kingpin_dir = upper_bj - lower_bj
+    
+    # Find intersection with the ground plane (contact_point Z)
+    t = (contact_point[2] -lower_bj[2]) / kingpin_dir[2]
+    
+    intersection_point = lower_bj + t * kingpin_dir
+    
+    # vector from contact point to steering axis ground intersection
+    offset_vec = intersection_point - contact_point
+
+    axle_dir_XY = jnp.array([axle_dir[0], axle_dir[1]])
+    axle_dir_XY_unit = axle_dir_XY / jnp.linalg.norm(axle_dir_XY)
+
+    offset_XY = jnp.array([offset_vec[0], offset_vec[1]])
+    scrub_radius = jnp.dot(offset_XY, axle_dir_XY_unit)
+    
+    return scrub_radius
+
+def report_mechanical_trail(upper_bj, lower_bj, contact_point, axle_dir):
+    """
+    Calculates Mechanical Trail as the distance perpendicular to the axle_dir
+    (i.e., along the tire's heading) on the ground plane.
+    """
+    kingpin_vec = upper_bj - lower_bj
+    t = (contact_point[2] - lower_bj[2]) / kingpin_vec[2]
+    intersection_point = lower_bj + t * kingpin_vec
+    offset_vec = intersection_point - contact_point
+    
+    # Heading vector is the axle vector rotated 90 degrees in XY
+    # If axle is [y, -x], heading is [x, y]
+    heading_unit_2d = jnp.array([-axle_dir[1], axle_dir[0]])
+    heading_unit_2d /= jnp.linalg.norm(heading_unit_2d)
+    
+    offset_2d = jnp.array([offset_vec[0], offset_vec[1]])
+    mechanical_trail = jnp.dot(offset_2d, heading_unit_2d)
+    
+    return mechanical_trail
+
+def calculate_isa_exact(upper_theta: float, steer: float, corner_geom):
+    """
+    Calculates the exact 3D Screw Axis using Automatic Differentiation.
+    Used for finding instant roll centers for each wheel, front/rear roll centers, vehicle roll axis
+    """
+    
+    # 1. Define a helper that returns the positions we care about
+    def upright_positions(theta):
+        res = solve_corner_jax(theta, steer, corner_geom)
+        return jnp.stack([res["upper_bj"], res["lower_bj"], res["toe_link"]])
+
+    # 2. Compute the Jacobian (The 'velocity' of the points w.r.t. theta)
+    # jac shape: (3 points, 3 coordinates) -> (3, 3)
+
+    jac_fn = jax.jacobian(upright_positions)
+    velocities = jac_fn(upper_theta)
+    
+    # Current positions
+    pos = upright_positions(upper_theta)
+    
+    p1, p2 = pos[0], pos[1]
+    v1, v2 = velocities[0], velocities[1]
+
+    # 3. Solve for Angular Velocity vector (omega)
+    # v2 - v1 = omega x (p2 - p1)
+    r12 = p2 - p1
+    v12 = v2 - v1
+    
+    # omega = (r12 x v12) / |r12|^2
+    omega = jnp.cross(r12, v12) / jnp.dot(r12, r12)
+    omega_mag_sq = jnp.dot(omega, omega)
+    
+    # 4. Extract Screw Parameters
+    # Direction unit vector
+    s = omega / jnp.sqrt(omega_mag_sq)
+    
+    # Pitch (h): component of linear velocity along the rotation axis
+    h = jnp.dot(v1, omega) / omega_mag_sq
+    
+    # Point on Axis (q): Point closest to origin
+    q = jnp.cross(omega, v1) / omega_mag_sq
+
+    return q, s, h
+
+def get_3d_instant_center(q, s, wheel_center_x):
+    """
+    Calculates the 3D coordinates of the Instant Center by intersecting 
+    the Screw Axis with the transverse plane at the wheel center.
+    
+    Parameters:
+        q: Point on the ISA (3D jnp.array)
+        s: Direction vector of the ISA (3D jnp.array)
+        wheel_center_x: The X-coordinate of the plane (typically the axle line)
+        
+    Returns:
+        ic_3d: 3D coordinates [x, y, z] of the Instant Center
+    """
+    
+    # 1. Solve for the parameter 't' in the line equation: P = q + t*s
+    # We want P.x = wheel_center_x
+    # wheel_center_x = q_x + t * s_x  => t = (wheel_center_x - q_x) / s_x
+    
+    denom = s[0]
+    
+    # Use jnp.where to handle axes parallel to the YZ plane (anti-dive/squat only)
+    # This prevents division by zero while maintaining differentiability.
+    t = jnp.where(
+        jnp.abs(denom) > 1e-9, 
+        (wheel_center_x - q[0]) / denom, 
+        0.0  # If parallel, fallback to the provided point on axis 'q'
+    )
+
+    # 2. Calculate the 3D position of the intersection
+    ic_3d = q + t * s
+    
+    # If the axis was parallel, the 't=0' result returns 'q'. 
+    # We force the X-coordinate to be wheel_center_x to ensure it stays in the plane.
+    ic_3d = jnp.where(
+        jnp.abs(denom) > 1e-9,
+        ic_3d,
+        ic_3d.at[0].set(wheel_center_x)
+    )
+
+    return ic_3d
+
+def solve_and_measure_corner(theta, steer, corner):
+    #funciton for performing sweeps and measuring changes on one corner
+    # TODO: scrub radius, mechanical trail
+    res = solve_corner_jax(theta, steer, corner)
+
+    axle_dir = res["axle_dir"]
+    wheel_center = res["wheel_center"]
+    contact = res["contact_point"]
+    upper_bj = res["upper_bj"]
+    lower_bj = res["lower_bj"]
+
+    camber = report_camber(axle_dir)
+    toe = report_toe(axle_dir)
+    kingpin = report_kingpin_inc(upper_bj, lower_bj)
+    caster = report_caster(upper_bj, lower_bj)
+    scrub_radius = report_mechanical_trail(upper_bj, lower_bj, contact_point, axle_dir)
+
+
+    return {
+        "camber": camber,
+        "toe": toe,
+        "kingpin_inc": kingpin,
+        "caster": caster,
+        "wheel_z": wheel_center[2],
+        "contact_z": contact[2],
+    }
