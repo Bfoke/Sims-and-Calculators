@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax
+import yaml
 
 '''
 
@@ -31,8 +32,8 @@ def axis_of_rot(A: jnp.array, B: jnp.array):
     return unit_vec
 
 def rotate_point(point: jnp.array, theta: float, A: jnp.array, B: jnp.array): 
-    # move by angle theta from initialized position
-    # return position in chassis frame
+    # move by angle theta from initial position
+
     axis = axis_of_rot(A, B)
 
     translated_point = point - B
@@ -77,6 +78,7 @@ def rigid_transform_jax(original_pos, new_pos):
             R: (3, 3) rotation matrix
             t: (3,) translation vector
         """
+
         # Centroids
         P_centroid = jnp.mean(original_pos, axis=0)
         Q_centroid = jnp.mean(new_pos, axis=0)
@@ -87,9 +89,9 @@ def rigid_transform_jax(original_pos, new_pos):
 
         # Kabsch algorithm to find rotation
         H = jnp.dot(P_centered.T, Q_centered)
-        U, S, Vt = jnp.linalg.svd(H)
+        U, S, Vt = jnp.linalg.svd(H, full_matrices = False)
         d = jnp.sign(jnp.linalg.det(jnp.dot(Vt.T, U.T)))
-        D = jnp.diag([1, 1, d])
+        D = jnp.diag(jnp.array([1, 1, d]))
         R = jnp.dot(Vt.T, jnp.dot(D, U.T))
 
         # Translation
@@ -184,19 +186,75 @@ def solve_toe_link_jax(
     
 def solve_corner_jax(upper_theta: float, steer: float, params):
     """
-    The 'Differentiable' version of your solve_corner.
-    'params' is a dictionary of all hardpoints as JAX arrays.
+    Differentiable suspension solver.
+    Returns a dictionary of all critical 3D points and vectors.
     """
-    # 1. Upper BJ Position
-    u_bj = rotate_point(params['u_front'], params['u_axis'], params['u_bj_0'], upper_theta)
+    # 1. Solve the 3 main control points (Upper BJ, Lower BJ, Toe Link)
+    u_bj = rotate_point(params['u_bj_0'], upper_theta, params['u_origin'], params['u_origin'] + params['u_axis'])
     
-    # 2. Lower BJ Position
-    _, l_bj = lower_wb_solve_jax(u_bj, params['l_rear'], params['l_axis'], params['l_bj_0'], params['joint_dist'])
+    _, l_bj = lower_wb_solve_jax(
+        u_bj, 
+        params['l_origin'], 
+        params['l_axis'], 
+        params['l_bj_0'], 
+        params['joint_dist']
+    )
     
-    # 3. Toe Link position for upright and rack/toe pickup point position
-    toe_link = solve_toe_link_jax(u_bj, l_bj, params['rack_origin'], steer)
+    toe_link = solve_toe_link_jax(
+        u_bj, 
+        l_bj, 
+        params['rack_origin'] + jnp.array([0, steer, 0]), 
+        params['u_toe_dist'], 
+        params['l_toe_dist'], 
+        params['tie_rod_len']
+    )
+
+    # 2. Compute Rigid Transform from Initial Pose to Current Pose
+    # P0: Original positions from YAML
+    # P1: Current solved positions
+    P0 = params['upright_pts_0'] # [u_bj_0, l_bj_0, toe_0]
+    P1 = jnp.stack([u_bj, l_bj, toe_link])
     
-    return jnp.stack([u_bj, l_bj, toe_link])
+    R_upright, t_upright = rigid_transform_jax(P0, P1)
+
+    # 3. Transform Axle Geometry
+    axle_root = R_upright @ params['axle_root_0'] + t_upright
+    axle_tip  = R_upright @ params['axle_tip_0'] + t_upright
+    
+    # 4. Calculate Axle Direction and Wheel Center
+    wheel_center = axle_root
+    axle_vec = axle_tip - axle_root
+    axle_dir = axle_vec / jnp.linalg.norm(axle_vec)
+
+    # 5. Calculate Contact Point (Lowest point on the wheel circle)
+    # The wheel is a circle in the plane normal to axle_dir.
+    # We find the direction 'd' that is the projection of gravity (0,0,-1) 
+    # onto the wheel plane.
+    gravity = jnp.array([0.0, 0.0, -1.0])
+    
+    # Projection of gravity onto the wheel plane: g_proj = g - (g dot n) * n
+    # n is the axle_dir
+    dot_gn = jnp.dot(gravity, axle_dir)
+    d_vec = gravity - dot_gn * axle_dir
+    
+    # Normalize the downward vector in the wheel plane
+    d_norm = jnp.linalg.norm(d_vec)
+    
+    # Handle the singular case (wheel perfectly horizontal - unlikely in cars)
+    # If d_norm is 0, we just go straight down in world Z
+    unit_down_in_plane = jnp.where(d_norm > 1e-9, d_vec / d_norm, jnp.array([0.0, 0.0, -1.0]))
+    
+    contact_point = wheel_center + params['wheel_radius'] * unit_down_in_plane
+
+    return {
+        "upper_bj": u_bj,
+        "lower_bj": l_bj,
+        "toe_link": toe_link,
+        "axle_dir": axle_dir,
+        "wheel_center": wheel_center,
+        "contact_point": contact_point,
+        "R_upright": R_upright
+    }
 
 ################################################
 # Functions for evaluating suspension geometry #
@@ -208,32 +266,30 @@ def project_YZ(p: jnp.array):
 
 def project_XZ(p: jnp.array):
     """Project 3D point onto side view XZ plane"""
-    return jnp.array(p[0], p[2]) # X, Z
+    return jnp.array([p[0], p[2]]) # X, Z
 
 def project_XY(p: jnp.array):
     """Project 3D point onto top view XY plane"""
-    return jnp.array(p[0], p[1]) # X, Y
+    return jnp.array([p[0], p[1]]) # X, Y
 
-def report_toe(axle_dir: jnp.array):
-
+def report_toe(axle_dir: jnp.array, side_sign: float):
     """find toe angle given axle direction vector"""
-
-    # report toe in chassis frame, only works if car is facing positive X direction
-    # TODO: add chassis R and T to compensate for chassis pose and report toe relative to chassis body not the axis
-
+    
     n = axle_dir / jnp.linalg.norm(axle_dir)
-
-    # project into XY plane (remove Z component)
     n_xy = project_XY(n)
 
-    # reference lateral direction (left)
-    y = jnp.array([0.0, 1.0])
+    # ADJUST REFERENCE: 
+    # Right side (side_sign=1) points to +Y
+    # Left side (side_sign=-1) points to -Y
+    # This ensures the reference and axle are pointing the same way (near 0°)
+    y_ref = jnp.array([0.0, 1.0 * side_sign])
 
-    # signed angle using atan2
-    cross = jnp.cross(y, n_xy)
-    dot = jnp.dot(y, n_xy)
+    # Calculate angle
+    cross = jnp.cross(y_ref, n_xy)
+    dot = jnp.dot(y_ref, n_xy)
 
-    toe = jnp.arctan2(cross[2], dot)
+    # This will now return values near 0 instead of near 180
+    toe = jnp.arctan2(cross, dot)
 
     return toe
 
@@ -246,21 +302,13 @@ def report_camber(axle_dir: jnp.array):
     n = axle_dir / jnp.linalg.norm(axle_dir)
 
     # project into YZ plane (remove X component)
-    n_yz = jnp.array([0.0, n[1], n[2]])
+    n_yz = jnp.array([n[1], n[2]])
 
-    # reference vertical
-    z = jnp.array([0.0, 0.0, 1.0])
+    # reference horizontal
+    z = jnp.array([1.0, 0.0])
 
-    # angle magnitude
-    cos_camber = jnp.dot(n_yz, z) / (
-        jnp.linalg.norm(n_yz) * jnp.linalg.norm(z)
-    )
-    camber = jnp.arccos(jnp.clip(cos_camber, -1.0, 1.0))
-
-    # sign: negative camber = top of wheel inboard
-    # left side: +Y is outboard
-    sign = -jnp.sign(n[1])
-    return sign * camber
+    camber = jnp.arctan2(n_yz[1], jnp.abs(n_yz[0]))
+    return camber
 
 def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
 
@@ -319,27 +367,26 @@ def report_kingpin_inc(upper_bj: jnp.array, lower_bj: jnp.array):
 
     return jnp.arccos(cos_theta)
 
-def report_scrub_radius(upper_bj: jnp.array, lower_bj: jnp.array, contact_point: jnp.array, axle_dir: jnp.array):
+def report_scrub_radius(upper_bj, lower_bj, contact_point, axle_dir, side_sign):
     """
-    Calculates Scrub Radius: The lateral distance between the 
-    contact patch and the kingpin axis intersection with the ground.
+    side_sign: 1.0 for Left (+Y), -1.0 for Right (-Y)
+    Positive Scrub = Steering intersection is OUTBOARD of contact patch center.
     """
-    # Define the steering axis Line: P = lower_bj + t * (upper_bj - lower_bj)
     kingpin_dir = upper_bj - lower_bj
-    
-    # Find intersection with the ground plane (contact_point Z)
-    t = (contact_point[2] -lower_bj[2]) / kingpin_dir[2]
-    
+    t = (contact_point[2] - lower_bj[2]) / kingpin_dir[2]
     intersection_point = lower_bj + t * kingpin_dir
     
-    # vector from contact point to steering axis ground intersection
+    # Vector from contact point to steering axis intersection
     offset_vec = intersection_point - contact_point
+    offset_XY = offset_vec[:2]
 
-    axle_dir_XY = jnp.array([axle_dir[0], axle_dir[1]])
-    axle_dir_XY_unit = axle_dir_XY / jnp.linalg.norm(axle_dir_XY)
+    # The 'outboard' direction is the axle direction pointing away from the car
+    # We ensure axle_dir_XY points outboard by using the side_sign
+    axle_dir_XY = axle_dir[:2]
+    outboard_unit_vec = (axle_dir_XY * side_sign) / jnp.linalg.norm(axle_dir_XY)
 
-    offset_XY = jnp.array([offset_vec[0], offset_vec[1]])
-    scrub_radius = jnp.dot(offset_XY, axle_dir_XY_unit)
+    # Scrub is positive if the offset aligns with the outboard vector
+    scrub_radius = jnp.dot(offset_XY, outboard_unit_vec)
     
     return scrub_radius
 
@@ -363,114 +410,88 @@ def report_mechanical_trail(upper_bj, lower_bj, contact_point, axle_dir):
     
     return mechanical_trail
 
-def calculate_isa_exact(upper_theta: float, steer: float, corner_geom):
+def calculate_isa_exact(theta: float, steer: float, params):
     """
     Calculates the exact 3D Screw Axis using Automatic Differentiation.
-    Used for finding instant roll centers for each wheel, front/rear roll centers, vehicle roll axis
+    Returns: q (point on axis), s (unit direction), h (pitch)
     """
+    # 1. We differentiate the solver directly
+    # jac shape: (3 points, 3 coordinates)
+    jac_fn = jax.jacobian(solve_corner_jax, argnums=0)
+    velocities = jac_fn(theta, steer, params)
     
-    # 1. Define a helper that returns the positions we care about
-    def upright_positions(theta):
-        res = solve_corner_jax(theta, steer, corner_geom)
-        return jnp.stack([res["upper_bj"], res["lower_bj"], res["toe_link"]])
-
-    # 2. Compute the Jacobian (The 'velocity' of the points w.r.t. theta)
-    # jac shape: (3 points, 3 coordinates) -> (3, 3)
-
-    jac_fn = jax.jacobian(upright_positions)
-    velocities = jac_fn(upper_theta)
+    # 2. Get current positions to define the rigid body state
+    positions = solve_corner_jax(theta, steer, params)
+    p1 = positions["upper_bj"]
+    p2 = positions["lower_bj"]
     
-    # Current positions
-    pos = upright_positions(upper_theta)
-    
-    p1, p2 = pos[0], pos[1]
-    v1, v2 = velocities[0], velocities[1]
+    v1 = velocities["upper_bj"]
+    v2 = velocities["lower_bj"]
 
     # 3. Solve for Angular Velocity vector (omega)
-    # v2 - v1 = omega x (p2 - p1)
     r12 = p2 - p1
     v12 = v2 - v1
-    
-    # omega = (r12 x v12) / |r12|^2
     omega = jnp.cross(r12, v12) / jnp.dot(r12, r12)
+    
     omega_mag_sq = jnp.dot(omega, omega)
+    omega_mag = jnp.sqrt(omega_mag_sq)
     
     # 4. Extract Screw Parameters
-    # Direction unit vector
-    s = omega / jnp.sqrt(omega_mag_sq)
-    
-    # Pitch (h): component of linear velocity along the rotation axis
+    s = omega / omega_mag
     h = jnp.dot(v1, omega) / omega_mag_sq
-    
-    # Point on Axis (q): Point closest to origin
-    q = jnp.cross(omega, v1) / omega_mag_sq
+    q = p1 + jnp.cross(omega, v1) / omega_mag_sq
 
     return q, s, h
 
-def get_3d_instant_center(q, s, wheel_center_x):
+def report_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
     """
-    Calculates the 3D coordinates of the Instant Center by intersecting 
-    the Screw Axis with the transverse plane at the wheel center.
-    
-    Parameters:
-        q: Point on the ISA (3D jnp.array)
-        s: Direction vector of the ISA (3D jnp.array)
-        wheel_center_x: The X-coordinate of the plane (typically the axle line)
-        
-    Returns:
-        ic_3d: 3D coordinates [x, y, z] of the Instant Center
+    Intersection of Screw Axis with the wheel's transverse plane.
     """
-    
-    # 1. Solve for the parameter 't' in the line equation: P = q + t*s
-    # We want P.x = wheel_center_x
-    # wheel_center_x = q_x + t * s_x  => t = (wheel_center_x - q_x) / s_x
-    
     denom = s[0]
     
-    # Use jnp.where to handle axes parallel to the YZ plane (anti-dive/squat only)
-    # This prevents division by zero while maintaining differentiability.
+    # Handle axis parallel to YZ plane to avoid div by zero
     t = jnp.where(
         jnp.abs(denom) > 1e-9, 
-        (wheel_center_x - q[0]) / denom, 
-        0.0  # If parallel, fallback to the provided point on axis 'q'
+        (wheel_x - q[0]) / denom, 
+        0.0
     )
 
-    # 2. Calculate the 3D position of the intersection
     ic_3d = q + t * s
     
-    # If the axis was parallel, the 't=0' result returns 'q'. 
-    # We force the X-coordinate to be wheel_center_x to ensure it stays in the plane.
-    ic_3d = jnp.where(
-        jnp.abs(denom) > 1e-9,
-        ic_3d,
-        ic_3d.at[0].set(wheel_center_x)
-    )
+    # Force X to wheel_x if it was parallel
+    ic_3d = jnp.where(jnp.abs(denom) > 1e-9, ic_3d, ic_3d.at[0].set(wheel_x))
 
     return ic_3d
 
-def solve_and_measure_corner(theta, steer, corner):
-    #funciton for performing sweeps and measuring changes on one corner
-    # TODO: scrub radius, mechanical trail
-    res = solve_corner_jax(theta, steer, corner)
+def solve_and_measure_corner(theta, steer, params):
+    """
+    Full kinematic evaluation of a single corner.
+    """
 
-    axle_dir = res["axle_dir"]
-    wheel_center = res["wheel_center"]
-    contact = res["contact_point"]
+    # solve for positions based on upper CA angle and steering/toe position
+    res = solve_corner_jax(theta, steer, params) 
+
+    # balljoint, cp, and hardpoint locations
     upper_bj = res["upper_bj"]
     lower_bj = res["lower_bj"]
+    contact = res["contact_point"]
+    axle_dir = res["axle_dir"]
+    wheel_center = res["wheel_center"]
+    side_sign = params["side_sign"]
 
-    camber = report_camber(axle_dir)
-    toe = report_toe(axle_dir)
-    kingpin = report_kingpin_inc(upper_bj, lower_bj)
-    caster = report_caster(upper_bj, lower_bj)
-    scrub_radius = report_mechanical_trail(upper_bj, lower_bj, contact_point, axle_dir)
-
+    # roll instant center
+    q, s, h = calculate_isa_exact(theta, steer, params)
+    ic_3d = report_instant_center(q, s, contact[0])
 
     return {
-        "camber": camber,
-        "toe": toe,
-        "kingpin_inc": kingpin,
-        "caster": caster,
+        "camber": report_camber(axle_dir),
+        "toe": report_toe(axle_dir, side_sign),
+        "kingpin_inc": report_kingpin_inc(upper_bj, lower_bj),
+        "caster": report_caster(upper_bj, lower_bj),
+        "scrub_radius": report_scrub_radius(upper_bj, lower_bj, contact, axle_dir, side_sign),
+        "mechanical_trail": report_mechanical_trail(upper_bj, lower_bj, contact, axle_dir),
+        "instant_center": ic_3d,
+        "screw_pitch": h,
         "wheel_z": wheel_center[2],
-        "contact_z": contact[2],
+        "contact_patch": contact,
     }
