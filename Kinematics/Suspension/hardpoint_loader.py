@@ -41,6 +41,11 @@ def load_suspension_params(file_path, corner_name="front_right"):
     current_side_sign = -base_side_sign if is_left else base_side_sign
 
     params = {
+        "u_front": u_f,
+        "u_rear": u_r,
+        "l_front": l_f,
+        "l_rear": l_r,
+        
         # Upper WB (Origin is rear pickup)
         "u_origin": u_r,
         "u_axis": (u_f - u_r) / jnp.linalg.norm(u_f - u_r),

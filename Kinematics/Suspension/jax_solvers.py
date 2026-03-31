@@ -15,9 +15,9 @@ all unlabeled positions are in world frame coordinates
 
 '''
 
-################################################
-# Functions for manipulating geometry
-################################################
+#######################################
+# Functions for manipulating geometry #
+#######################################
 
 def axis_of_rot(A: jnp.array, B: jnp.array): 
     """helper function for rotate point function"""
@@ -462,6 +462,57 @@ def report_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
     ic_3d = jnp.where(jnp.abs(denom) > 1e-9, ic_3d, ic_3d.at[0].set(wheel_x))
 
     return ic_3d
+
+def find_2d_intersection(p1, p2, p3, p4):
+    """
+    Finds intersection of line (p1-p2) and (p3-p4) in 2D.
+    Points are jnp.array([Y, Z])
+    """
+    # Line 1: a1*y + b1*z = c1
+    a1 = p2[1] - p1[1]
+    b1 = p1[0] - p2[0]
+    c1 = a1*p1[0] + b1*p1[1]
+
+    # Line 2: a2*y + b2*z = c2
+    a2 = p4[1] - p3[1]
+    b2 = p3[0] - p4[0]
+    c2 = a2*p3[0] + b2*p3[1]
+
+    determinant = a1*b2 - a2*b1
+    
+    # Intersection coordinates
+    y = (b2*c1 - b1*c2) / determinant
+    z = (a1*c2 - a2*c1) / determinant
+    
+    return jnp.array([y, z])
+
+def report_roll_center(theta_r, theta_l, steer, params_r, params_l):
+    """
+    Solves both corners and finds the Roll Center.
+    """
+    # 1. Solve both corners
+    data_r = solve_and_measure_corner(theta_r, steer, params_r)
+    data_l = solve_and_measure_corner(theta_l, steer, params_l)
+    
+    # 2. Extract YZ projections for Swing Arm lines
+    cp_r = project_YZ(data_r["contact_patch"])
+    ic_r = project_YZ(data_r["instant_center"])
+    
+    cp_l = project_YZ(data_l["contact_patch"])
+    ic_l = project_YZ(data_l["instant_center"])
+    
+    # 3. Intersection of (CP_R -> IC_R) and (CP_L -> IC_L)
+    rc_yz = find_2d_intersection(cp_r, ic_r, cp_l, ic_l)
+    
+    return {
+        "roll_center": rc_yz,
+        "right_data": data_r,
+        "left_data": data_l
+    }
+
+###################################
+# Functions for measuring results #
+###################################
 
 def solve_and_measure_corner(theta, steer, params):
     """
