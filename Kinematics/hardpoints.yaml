@@ -31,12 +31,16 @@ front_right:
   # Steering/Toe Constraints
   steering:
     rack_end_0: [1.6129, -0.2286, 0.1862]
-    tie_rod_length: 0.3608
+    # remove length and calculate it based on the distance between toe_link_0 and rack_end_0
+    # have to change the loader to reflect this
+    # tie_rod_length: 0.3608
+    forward_rack: True
 
   # side sign for fixing sign errors in measurements
   side_sign: -1.0
 
 # Suspension Geometry for Rear Right (RR)
+# Rear left will be same with all y coords sign
 rear_right:
   # Chassis Pickups (Fixed)
   upper_wishbone:
@@ -61,7 +65,9 @@ rear_right:
   # Steering/Toe Constraints
   steering:
     rack_end_0: [-0.0038, -0.3137, 0.3302]
-    tie_rod_length: 0.1958
+    # tie_rod_length: 0.1958
+    forward_rack: False
 
   # side sign for fixing sign errors in measurements
   side_sign: -1.0
+

@@ -67,7 +67,7 @@ class SuspensionVisualizer:
         line = np.array(toe) - np.array(rack)
         length = np.linalg.norm(line)
         center = np.array(rack) + line / 2
-        cylinder = pv.Cylinder(center=center, direction=line, radius=0.015, height=length)
+        cylinder = pv.Cylinder(center=center, direction=line, radius=0.0125, height=length)
         self.meshes[name] = self.plotter.add_mesh(cylinder, color="gray")
 
     def setup_wheel_disc(self, center, axle_dir, radius, width, name):
@@ -76,6 +76,40 @@ class SuspensionVisualizer:
         cylinder = pv.Cylinder(center=center, direction=axle_dir, radius=radius, height=width)
         # Make the wheel look like rubber/material, not metallic
         self.meshes[name] = self.plotter.add_mesh(cylinder, color="dimgray", opacity=0.6)
+
+    def setup_instant_center(self, ic_pos, cp_pos, name):
+        """Creates a sphere for the IC and a dashed line for the swing arm."""
+        # The IC Sphere
+        sphere = pv.Sphere(radius=0.03, center=ic_pos)
+        self.meshes[f"{name}_pt"] = self.plotter.add_mesh(sphere, color="cyan", label="Instant Center")
+        
+        # The Swing Arm Line (CP to IC)
+        line = pv.Line(cp_pos, ic_pos)
+        self.meshes[f"{name}_line"] = self.plotter.add_mesh(line, color="cyan", line_width=1, opacity=0.5)
+
+    def setup_pitch_center(self, pic_pos, cp_pos, name):
+        """Creates a sphere for the Side-View IC and a line for anti-geometry visualization."""
+        # The Pitch IC Sphere
+        sphere = pv.Sphere(radius=0.03, center=pic_pos)
+        self.meshes[f"{name}_pt"] = self.plotter.add_mesh(sphere, color="orange", label="Pitch IC")
+        
+        # The Swing Arm Line (Contact Patch to Pitch IC)
+        line = pv.Line(cp_pos, pic_pos)
+        self.meshes[f"{name}_line"] = self.plotter.add_mesh(line, color="orange", line_width=2, opacity=0.5)
+    
+    def setup_isa_axis(self, q, s, name, length=1.0):
+        """Visualizes the 3D Screw Axis as a line passing through q."""
+        # Create a line centered at q extending along s
+        p1 = q - (s * length / 2)
+        p2 = q + (s * length / 2)
+        
+        line = pv.Line(p1, p2)
+        # We use a tube to make it more visible than a 1-pixel line
+        self.meshes[f"{name}_axis"] = self.plotter.add_mesh(
+            line.tube(radius=0.005), 
+            color="lime", 
+            label="Screw Axis (ISA)"
+        )
 
     # --- Scene Updaters (For Animation) ---
     def update_wishbone(self, name, p1_mount, p2_mount, bj_current):
@@ -106,3 +140,29 @@ class SuspensionVisualizer:
         # Wheel must re-orient every frame
         new_geom = pv.Cylinder(center=center, direction=axle_dir, radius=radius, height=width)
         self.meshes[name].mapper.dataset.copy_from(new_geom)
+
+    def update_instant_center(self, name, ic_pos, cp_pos):
+        """Updates the IC position and the swing arm line."""
+        # Update Sphere
+        new_sphere = pv.Sphere(radius=0.03, center=ic_pos)
+        self.meshes[f"{name}_pt"].mapper.dataset.copy_from(new_sphere)
+        
+        # Update Line
+        new_line = pv.Line(cp_pos, ic_pos)
+        self.meshes[f"{name}_line"].mapper.dataset.copy_from(new_line)
+
+    def update_pitch_center(self, name, pic_pos, cp_pos):
+        """Updates the Pitch IC position and its associated swing arm line."""
+        new_sphere = pv.Sphere(radius=0.03, center=pic_pos)
+        self.meshes[f"{name}_pt"].mapper.dataset.copy_from(new_sphere)
+        
+        new_line = pv.Line(cp_pos, pic_pos)
+        self.meshes[f"{name}_line"].mapper.dataset.copy_from(new_line)
+    
+    def update_isa_axis(self, name, q, s, length=1.0):
+        """Moves the ISA axis during animation."""
+        p1 = q - (s * length / 2)
+        p2 = q + (s * length / 2)
+        
+        new_line = pv.Line(p1, p2).tube(radius=0.005)
+        self.meshes[f"{name}_axis"].mapper.dataset.copy_from(new_line)

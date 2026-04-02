@@ -170,10 +170,7 @@ def solve_toe_link_jax(
 
     z_sq = upper_toe_dist**2 - x**2 - y**2
 
-    if z_sq < 0:
-        raise ValueError("No real toe-link solution")
-
-    z = jnp.sqrt(z_sq)
+    z = jnp.sqrt(jnp.maximum(z_sq, 0.0))
 
     sol1 = P1 + x * ex + y * ey + z * ez
     sol2 = P1 + x * ex + y * ey - z * ez
@@ -206,12 +203,19 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
         params['rack_origin'] + jnp.array([0, steer, 0]), 
         params['u_toe_dist'], 
         params['l_toe_dist'], 
-        params['tie_rod_len']
+        params['tie_rod_len'],
+        forward_rack=params['forward_rack']
     )
 
     # 2. Compute Rigid Transform from Initial Pose to Current Pose
     # P0: Original positions from YAML
     # P1: Current solved positions
+    # u_bj_0 = params['u_bj_0']
+    # l_bj_0 = params['l_bj_0']
+    # toe_0  = params['toe_link_0'] 
+
+    # P0 = jnp.stack([u_bj_0, l_bj_0, toe_0])
+    # P1 = jnp.stack([u_bj, l_bj, toe_link])
     P0 = params['upright_pts_0'] # [u_bj_0, l_bj_0, toe_0]
     P1 = jnp.stack([u_bj, l_bj, toe_link])
     
@@ -273,22 +277,17 @@ def project_XY(p: jnp.array):
     return jnp.array([p[0], p[1]]) # X, Y
 
 def report_toe(axle_dir: jnp.array, side_sign: float):
-    """find toe angle given axle direction vector"""
+    """find toe angle in chassis frame given axle direction vector"""
     
     n = axle_dir / jnp.linalg.norm(axle_dir)
     n_xy = project_XY(n)
 
-    # ADJUST REFERENCE: 
-    # Right side (side_sign=1) points to +Y
-    # Left side (side_sign=-1) points to -Y
-    # This ensures the reference and axle are pointing the same way (near 0°)
     y_ref = jnp.array([0.0, 1.0 * side_sign])
 
     # Calculate angle
     cross = jnp.cross(y_ref, n_xy)
     dot = jnp.dot(y_ref, n_xy)
 
-    # This will now return values near 0 instead of near 180
     toe = jnp.arctan2(cross, dot)
 
     return toe
@@ -443,7 +442,7 @@ def calculate_isa_exact(theta: float, steer: float, params):
 
     return q, s, h
 
-def report_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
+def report_roll_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
     """
     Intersection of Screw Axis with the wheel's transverse plane.
     """
@@ -462,6 +461,25 @@ def report_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
     ic_3d = jnp.where(jnp.abs(denom) > 1e-9, ic_3d, ic_3d.at[0].set(wheel_x))
 
     return ic_3d
+
+def report_pitch_instant_center(q: jnp.array, s: jnp.array, target_y: float):
+    """
+    Finds the intersection of the Screw Axis with a longitudinal XZ plane at target_y.
+    This represents the Pitch Center for that specific corner.
+    """
+    # We want q_y + t * s_y = target_y
+    denom = s[1] # Look at the Y component of the unit direction
+    
+    t = jnp.where(
+        jnp.abs(denom) > 1e-9, 
+        (target_y - q[1]) / denom, 
+        0.0
+    )
+
+    ic_3d = q + t * s
+    
+    # Project to XZ coordinates
+    return ic_3d # [X, Z]
 
 def find_2d_intersection(p1, p2, p3, p4):
     """
@@ -510,6 +528,41 @@ def report_roll_center(theta_r, theta_l, steer, params_r, params_l):
         "left_data": data_l
     }
 
+def report_pitch_center(theta_f, theta_r, params_f, params_r):
+
+    # p sure this is wrong
+
+    """
+    Evaluates the pitch center of the vehicle in the side view (XZ).
+    """
+    # 1. Solve both front and rear ISA
+    q_f, s_f, _ = calculate_isa_exact(theta_f, 0.0, params_f)
+    q_r, s_r, _ = calculate_isa_exact(theta_r, 0.0, params_r)
+    
+    # 2. Get 2D Pitch ICs (SVIC) in XZ plane
+    # We use the wheel center Y for each corner
+    svic_f = report_pitch_instant_center(q_f, s_f, params_f['upright_pts_0'][0][1])
+    svic_r = report_pitch_instant_center(q_r, s_r, params_r['upright_pts_0'][0][1])
+    
+    # 3. Get Contact Patches
+    res_f = solve_corner_jax(theta_f, 0.0, params_f)
+    res_r = solve_corner_jax(theta_r, 0.0, params_r)
+    
+    cp_f = project_XZ(res_f["contact_patch"])
+    cp_r = project_XZ(res_r["contact_patch"])
+    
+    # 4. Intersect the two Swing Arm lines in XZ plane
+    # Front line: CP_F -> SVIC_F
+    # Rear line:  CP_R -> SVIC_R
+    # Use your existing find_2d_intersection but it expects [X, Z] now
+    pitch_center_xz = find_2d_intersection(cp_f, svic_f, cp_r, svic_r)
+    
+    return {
+        "pitch_center": pitch_center_xz, # [X_coord, Z_height]
+        "svic_front": svic_f,
+        "svic_rear": svic_r
+    }
+
 ###################################
 # Functions for measuring results #
 ###################################
@@ -525,14 +578,20 @@ def solve_and_measure_corner(theta, steer, params):
     # balljoint, cp, and hardpoint locations
     upper_bj = res["upper_bj"]
     lower_bj = res["lower_bj"]
+    toe_link = res["toe_link"]
     contact = res["contact_point"]
     axle_dir = res["axle_dir"]
     wheel_center = res["wheel_center"]
+    R_upright = res["R_upright"]
     side_sign = params["side_sign"]
 
-    # roll instant center
+    # instant centers
     q, s, h = calculate_isa_exact(theta, steer, params)
-    ic_3d = report_instant_center(q, s, contact[0])
+    roll_ic_3d = report_roll_instant_center(q, s, contact[0])
+    pitch_ic_3d = report_pitch_instant_center(q, s, contact[1])
+    # print(pitch_ic_3d)
+    det = jnp.linalg.det(res["R_upright"])
+    print(det)
 
     return {
         "camber": report_camber(axle_dir),
@@ -541,8 +600,17 @@ def solve_and_measure_corner(theta, steer, params):
         "caster": report_caster(upper_bj, lower_bj),
         "scrub_radius": report_scrub_radius(upper_bj, lower_bj, contact, axle_dir, side_sign),
         "mechanical_trail": report_mechanical_trail(upper_bj, lower_bj, contact, axle_dir),
-        "instant_center": ic_3d,
+        "instant_roll_center": roll_ic_3d,
+        "instant_pitch_center": pitch_ic_3d,
+        "isa_q": q, 
+        "isa_s": s,         
         "screw_pitch": h,
         "wheel_z": wheel_center[2],
         "contact_patch": contact,
+        "upper_bj": upper_bj,
+        "lower_bj": lower_bj,
+        "toe_link": toe_link,
+        "axle_dir": axle_dir,
+        "wheel_center": wheel_center,
+        "R_upright": R_upright
     }
