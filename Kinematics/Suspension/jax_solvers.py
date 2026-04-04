@@ -65,46 +65,61 @@ def rotate_point(point: jnp.array, theta: float, A: jnp.array, B: jnp.array):
 
     return rotated_point #new upright balljoint location
 
-def rigid_transform_jax(original_pos, new_pos): 
+def rigid_transform_jax(original_pos, new_pos):
+    # original_pos and new_pos are (3, 3) -> 3 points, each with 3 coords
+    P = original_pos.T # Make it (3, N)
+    Q = new_pos.T
 
-        """
-        Computes the rigid transformation (rotation + translation) that aligns P to Q.
+    P_centroid = jnp.mean(P, axis=1, keepdims=True)
+    Q_centroid = jnp.mean(Q, axis=1, keepdims=True)
 
-        Parameters:
-            P: (3, 3) numpy array of source points
-            Q: (3, 3) numpy array of destination points
+    P_centered = P - P_centroid
+    Q_centered = Q - Q_centroid
 
-        Returns:
-            R: (3, 3) rotation matrix
-            t: (3,) translation vector
-        """
+    H = Q_centered @ P_centered.T
+    U, S, Vt = jnp.linalg.svd(H, full_matrices = False)
+    
+    R = U @ Vt
+    # Reflection handle
+    d = jnp.linalg.det(R)
+    U = U.at[:, 2].multiply(jnp.where(d < 0, -1.0, 1.0))
+    R = U @ Vt
 
-        # Centroids
-        P_centroid = jnp.mean(original_pos, axis=0)
-        Q_centroid = jnp.mean(new_pos, axis=0)
+    t = Q_centroid - R @ P_centroid
 
-        # Center the point sets
-        P_centered = original_pos - P_centroid
-        Q_centered = new_pos - Q_centroid
+    return R, t.flatten()
 
-        # Kabsch algorithm to find rotation
-        H = jnp.dot(P_centered.T, Q_centered)
-        U, S, Vt = jnp.linalg.svd(H, full_matrices = False)
-        d = jnp.sign(jnp.linalg.det(jnp.dot(Vt.T, U.T)))
-        D = jnp.diag(jnp.array([1, 1, d]))
-        R = jnp.dot(Vt.T, jnp.dot(D, U.T))
+# def lower_wb_solve_jax_old(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
+#     """
+#     Find lower wishbone angle/position that fits with an upper wishbone position
+#     """
+#     def get_l_bj(theta):
+#         # Rodrigues rotation formula
+#         translated = l_wb_bj_0 - l_wb_origin
+#         cos_t = jnp.cos(theta)
+#         sin_t = jnp.sin(theta)
+#         dot = jnp.dot(l_wb_axis, translated)
+#         cross = jnp.cross(l_wb_axis, translated)
+#         rotated = translated * cos_t + cross * sin_t + l_wb_axis * dot * (1 - cos_t)
+#         return rotated + l_wb_origin
 
-        # Translation
-        t = Q_centroid - jnp.dot(P_centroid, R)
+#     def f(theta):
+#         l_bj = get_l_bj(theta)
+#         return jnp.linalg.norm(u_wb_bj - l_bj) - joint_dist
 
-        return R, t
+#     # Newton-Raphson method
+#     theta = 0.0  # Initial guess
+#     for _ in range(10):  
+#         f_val, f_grad = jax.value_and_grad(f)(theta)
+#         theta = theta - f_val / f_grad
+    
+#     return theta, get_l_bj(theta)
 
 def lower_wb_solve_jax(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
     """
-    Find lower wishbone angle/position that fits with an upper wishbone position
+    Find lower wishbone angle with a penalty to keep it below the upper BJ.
     """
     def get_l_bj(theta):
-        # Rodrigues rotation formula
         translated = l_wb_bj_0 - l_wb_origin
         cos_t = jnp.cos(theta)
         sin_t = jnp.sin(theta)
@@ -115,17 +130,36 @@ def lower_wb_solve_jax(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
 
     def f(theta):
         l_bj = get_l_bj(theta)
-        return jnp.linalg.norm(u_wb_bj - l_bj) - joint_dist
+        
+        # 1. Standard kinematic constraint (Distance)
+        dist_err = jnp.linalg.norm(u_wb_bj - l_bj) - joint_dist
+        
+        # 2. Height Penalty: Lower BJ must be below Upper BJ (l_bj[2] < u_wb_bj[2])
+        # If height_diff is positive (inverted), we add a massive penalty.
+        height_diff = l_bj[2] - u_wb_bj[2]
+        
+        # We use a soft-plus style penalty so the gradient points "down" 
+        # even if it accidentally crosses over.
+        # Penalty = (height_diff + 0.1)^2 if height_diff > -0.05
+        penalty = jnp.where(height_diff > -0.05, 1000.0 * (height_diff + 0.05)**2, 0.0)
+        
+        return dist_err**2 + penalty # Minimize squared error + penalty
 
-    # Newton-Raphson method
-    theta = 0.0  # Initial guess
+    # 1. Better Initial Guess: Try a few angles to find the "low" side
+    # Newton-Raphson is a local optimizer; it needs to start in the right valley.
+    search_range = jnp.linspace(-jnp.pi/3, jnp.pi/3, 8)
+    costs = jax.vmap(f)(search_range)
+    theta = search_range[jnp.argmin(costs)]
+
+    # 2. Newton-Raphson Refinement
     for _ in range(10):  
         f_val, f_grad = jax.value_and_grad(f)(theta)
-        theta = theta - f_val / f_grad
+        # Add epsilon to grad to avoid div by zero
+        theta = theta - f_val / (f_grad + 1e-9)
     
     return theta, get_l_bj(theta)
 
-def solve_toe_link_jax(
+def solve_toe_link_jax_old(
     upper_bj,
     lower_bj,
     rack_pos,
@@ -177,9 +211,106 @@ def solve_toe_link_jax(
 
     # Physical solution selection
     if forward_rack:
-        return sol1 if sol1[0] > sol2[0] else sol2
+        # If rack is forward, we usually want the solution with the larger X 
+        # (further forward). jnp.where handles the tracer correctly.
+        return jnp.where(sol1[0] > sol2[0], sol1, sol2)
     else:
-        return sol1 if sol1[0] < sol2[0] else sol2
+        # If rack is rearward, we want the smaller X
+        return jnp.where(sol1[0] < sol2[0], sol1, sol2)
+
+# def solve_toe_link_jax(
+#     upper_bj, lower_bj, rack_pos, 
+#     upper_toe_dist, lower_toe_dist, tie_rod_length, 
+#     params, forward_rack=True
+# ):
+# #has discontinuity at theta=0 but values seem mostly correct
+#     P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
+
+#     ex = (P2 - P1) / jnp.linalg.norm(P2 - P1)
+#     i = jnp.dot(ex, P3 - P1)
+#     temp = P3 - P1 - i * ex
+#     ey = temp / jnp.linalg.norm(temp)
+#     ez = jnp.cross(ex, ey)
+#     j = jnp.dot(ey, P3 - P1)
+#     d = jnp.linalg.norm(P2 - P1)
+
+#     x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
+#     y = (upper_toe_dist**2 - tie_rod_length**2 + i**2 + j**2 - 2 * i * x) / (2 * j)
+    
+#     z_sq = upper_toe_dist**2 - x**2 - y**2
+#     z = jnp.sqrt(jnp.maximum(z_sq, 0.0))
+
+#     sol1 = P1 + x * ex + y * ey + z * ez
+#     sol2 = P1 + x * ex + y * ey - z * ez
+
+#     diff1 = jnp.linalg.norm(sol1 - params['toe_link_0'])
+#     diff2 = jnp.linalg.norm(sol2 - params['toe_link_0'])
+#     chosen_sol = jnp.where(diff1 < diff2, sol1, sol2)
+    
+#     # Diagnostics: 
+#     # 1. Separation is the distance between the two potential solutions (2 * z)
+#     # 2. z_sq shows how "deep" into the valid geometry we are (if negative, geometry is impossible)
+#     separation = jnp.linalg.norm(sol1 - sol2)
+    
+#     return chosen_sol, separation, z_sq
+
+def solve_toe_link_jax(
+    upper_bj, lower_bj, rack_pos, 
+    upper_toe_dist, lower_toe_dist, tie_rod_length, 
+    params, forward_rack=True
+):
+    P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
+
+    # 1. Primary axis: Kingpin (Stay consistent)
+    bj_vec = P2 - P1
+    d = jnp.linalg.norm(bj_vec)
+    ex = bj_vec / d
+
+    # 2. STABLE BASIS: Use Global Y (Lateral) as reference
+    # This prevents the basis from flipping at theta=0
+    ref = jnp.array([0.0, 1.0, 0.0])
+    ez_vec = jnp.cross(ex, ref)
+    ez = ez_vec / (jnp.linalg.norm(ez_vec) + 1e-9)
+    ey = jnp.cross(ez, ex)
+
+    # 3. Project Rack (P3) into this stable frame
+    # Vector from Upper BJ to Rack
+    p3_rel = P3 - P1
+    
+    i = jnp.dot(p3_rel, ex)
+    j = jnp.dot(p3_rel, ey)
+    k = jnp.dot(p3_rel, ez)
+
+    # 4. Correct Trilateration Math
+    # We solve for x, y, z in the local ex, ey, ez frame
+    # where the three spheres are centered at (0,0,0), (d,0,0), and (i,j,k)
+    x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
+    
+    # Quadratic solution for y/z intersection
+    # This accounts for the fact that the rack is not perfectly on the ey axis
+    C1 = upper_toe_dist**2 - x**2
+    C2 = tie_rod_length**2 - (x - i)**2 - j**2 - k**2
+    
+    # We use a simplified projection since we just need the point on the tie-rod arc
+    # This y calculation matches the geometry of the rack-to-upright link
+    y = (C1 - C2 + 2 * j * 0 + 2 * k * 0) / (2 * j + 1e-9) 
+    
+    # Check for geometric validity
+    z_sq = upper_toe_dist**2 - x**2 - y**2
+    z = jnp.sqrt(jnp.maximum(z_sq, 0.0))
+
+    # 5. Generate potential solutions
+    sol1 = P1 + x * ex + y * ey + z * ez
+    sol2 = P1 + x * ex + y * ey - z * ez
+
+    # 6. Selection based on static reference (prevents snapping)
+    diff1 = jnp.linalg.norm(sol1 - params['toe_link_0'])
+    diff2 = jnp.linalg.norm(sol2 - params['toe_link_0'])
+    chosen_sol = jnp.where(diff1 < diff2, sol1, sol2)
+    
+    separation = jnp.linalg.norm(sol1 - sol2)
+    
+    return chosen_sol, separation, z_sq
     
 def solve_corner_jax(upper_theta: float, steer: float, params):
     """
@@ -197,26 +328,26 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
         params['joint_dist']
     )
     
-    toe_link = solve_toe_link_jax(
+    toe_link, toe_sep, toe_z_sq = solve_toe_link_jax(
         u_bj, 
         l_bj, 
         params['rack_origin'] + jnp.array([0, steer, 0]), 
         params['u_toe_dist'], 
         params['l_toe_dist'], 
         params['tie_rod_len'],
+        params,
         forward_rack=params['forward_rack']
     )
 
     # 2. Compute Rigid Transform from Initial Pose to Current Pose
-    # P0: Original positions from YAML
+    # P0: Original positions from hardpoints YAML
     # P1: Current solved positions
-    # u_bj_0 = params['u_bj_0']
-    # l_bj_0 = params['l_bj_0']
-    # toe_0  = params['toe_link_0'] 
 
-    # P0 = jnp.stack([u_bj_0, l_bj_0, toe_0])
-    # P1 = jnp.stack([u_bj, l_bj, toe_link])
-    P0 = params['upright_pts_0'] # [u_bj_0, l_bj_0, toe_0]
+    u_bj_0 = params['u_bj_0']
+    l_bj_0 = params['l_bj_0']
+    toe_0  = params['toe_link_0'] 
+
+    P0 = jnp.stack([u_bj_0, l_bj_0, toe_0])
     P1 = jnp.stack([u_bj, l_bj, toe_link])
     
     R_upright, t_upright = rigid_transform_jax(P0, P1)
@@ -231,9 +362,6 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
     axle_dir = axle_vec / jnp.linalg.norm(axle_vec)
 
     # 5. Calculate Contact Point (Lowest point on the wheel circle)
-    # The wheel is a circle in the plane normal to axle_dir.
-    # We find the direction 'd' that is the projection of gravity (0,0,-1) 
-    # onto the wheel plane.
     gravity = jnp.array([0.0, 0.0, -1.0])
     
     # Projection of gravity onto the wheel plane: g_proj = g - (g dot n) * n
@@ -244,7 +372,7 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
     # Normalize the downward vector in the wheel plane
     d_norm = jnp.linalg.norm(d_vec)
     
-    # Handle the singular case (wheel perfectly horizontal - unlikely in cars)
+    # Handle the singular case (wheel perfectly horizontal, you fucked up)
     # If d_norm is 0, we just go straight down in world Z
     unit_down_in_plane = jnp.where(d_norm > 1e-9, d_vec / d_norm, jnp.array([0.0, 0.0, -1.0]))
     
@@ -257,9 +385,89 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
         "axle_dir": axle_dir,
         "wheel_center": wheel_center,
         "contact_point": contact_point,
-        "R_upright": R_upright
+        "R_upright": R_upright,
+        "toe_seperation": toe_sep,
+        "toe_z_sq": toe_z_sq
     }
 
+def solve_theta_for_ground(steer, world_params):
+    def objective(theta):
+        res = solve_corner_jax(theta, steer, world_params)
+        return res["contact_point"][2] 
+
+    # Brute force search (This is safe for tracing because search_range is static)
+    search_range = jnp.linspace(-jnp.pi/4, jnp.pi/4, 20)
+    z_vals = jax.vmap(objective)(search_range)
+    
+    # Use jnp.argmin to find the starting point
+    best_idx = jnp.argmin(jnp.abs(z_vals))
+    theta_guess = search_range[best_idx]
+
+    # Newton-Raphson
+    t = theta_guess
+    for _ in range(10):
+        val, grad = jax.value_and_grad(objective)(t)
+        # Use a small epsilon to prevent NaN if grad is 0
+        t = t - val / (grad + 1e-9)
+        
+    return t
+
+def update_full_car(chassis_pose, steering_input, all_params):
+    """
+    chassis_pose: {'xyz': [x,y,z], 'roll': r, 'pitch': p}
+    """
+    world_results = {}
+    
+    for side in ["fr", "fl", "rr", "rl"]:
+        # 1. Move chassis points to world space
+        world_p = get_world_params(
+            all_params[side], 
+            chassis_pose['xyz'], 
+            chassis_pose['roll'], 
+            chassis_pose['pitch']
+        )
+        
+        # 2. Find the theta that keeps the tire on the ground
+        target_theta = solve_theta_for_ground(steering_input, world_p)
+        
+        # 3. Solve the final kinematics for visualization
+        world_results[side] = solve_and_measure_corner(target_theta, steering_input, world_p)
+        
+    return world_results
+
+def get_world_params(local_params, chassis_xyz, roll, pitch):
+    """
+    Transforms local chassis hardpoints into World Space.
+    chassis_xyz: [x, y, z] position of the YAML origin in the world.
+    """
+    # Rotation Matrices (Roll then Pitch)
+    cR, sR = jnp.cos(roll), jnp.sin(roll)
+    cP, sP = jnp.cos(pitch), jnp.sin(pitch)
+    
+    # Roll (X-axis)
+    Rx = jnp.array([[1, 0, 0], [0, cR, -sR], [0, sR, cR]])
+    # Pitch (Y-axis)
+    Ry = jnp.array([[cP, 0, sP], [0, 1, 0], [-sP, 0, cP]])
+    
+    R_chassis = Ry @ Rx
+    
+    def transform_pt(pt):
+        return R_chassis @ jnp.asarray(pt) + jnp.asarray(chassis_xyz)
+
+    # Return a new dict with world coordinates
+    world_p = dict(local_params)
+    for key in ['u_front', 'u_rear', 'l_front', 'l_rear', 'rack_origin', 
+                'u_bj_0', 'l_bj_0', 'toe_link_0', 'axle_root_0', 'axle_tip_0']:
+        world_p[key] = transform_pt(local_params[key])
+    
+    # Vectors (directions) only get rotated, not translated
+    world_p['u_axis'] = R_chassis @ local_params['u_axis']
+    world_p['l_axis'] = R_chassis @ local_params['l_axis']
+    
+    # Update the upright_pts_0 stack for the rigid transform
+    world_p['upright_pts_0'] = jnp.stack([world_p['u_bj_0'], world_p['l_bj_0'], world_p['toe_link_0']])
+    
+    return world_p
 ################################################
 # Functions for evaluating suspension geometry #
 ################################################
@@ -314,7 +522,6 @@ def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
     """find caster angle given balljoint positions"""
 
     # only valid if vehicle pose is on ground and facing positive X direction
-    # TODO: add chassis R and T to make it always valid
     bj_vec = upper_bj - lower_bj
 
     # reference vertical vector
@@ -338,7 +545,7 @@ def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
 
     return jnp.arccos(cos_theta)
 
-def report_kingpin_inc(upper_bj: jnp.array, lower_bj: jnp.array):
+def report_kingpin_inc_has_jump_bug(upper_bj: jnp.array, lower_bj: jnp.array):
 
     """find kingpin inclination given upper and lower balljoint positions"""
 
@@ -365,6 +572,37 @@ def report_kingpin_inc(upper_bj: jnp.array, lower_bj: jnp.array):
     cos_theta = jnp.clip(cos_theta, -1.0, 1.0)
 
     return jnp.arccos(cos_theta)
+
+def report_kingpin_inc(upper_bj: jnp.array, lower_bj: jnp.array, side_sign: float):
+    """
+    Find kingpin inclination (KPI) given balljoint positions.
+    side_sign: 1.0 for Left (+Y), -1.0 for Right (-Y)
+    """
+    # 1. Kingpin vector (Lower to Upper)
+    bj_vec = upper_bj - lower_bj
+    
+    # 2. Reference vertical vector
+    vertical_vec = jnp.array([0.0, 0.0, 1.0])
+
+    # 3. Define the Front-View Plane (YZ-plane)
+    # The normal to this plane is the Global X (Forward) axis
+    plane_normal = jnp.array([1.0, 0.0, 0.0])
+
+    # 4. Project the Kingpin vector onto the YZ-plane
+    # v_proj = v - (v·n)n
+    bj_proj = bj_vec - jnp.dot(bj_vec, plane_normal) * plane_normal
+    
+    # 5. Calculate angle using arctan2 for 360-degree stability
+    # We want the angle between the vertical and the projected BJ vector
+    # We multiply the Y-component by side_sign so that 'inboard' is always the same direction
+    y_comp = bj_proj[1] * side_sign
+    z_comp = bj_proj[2]
+    
+    # KPI is the angle from the vertical (Z-axis) toward the centerline
+    # arctan2(y, z) gives the angle relative to the Z-axis
+    kpi = jnp.arctan2(-y_comp, z_comp)
+
+    return kpi
 
 def report_scrub_radius(upper_bj, lower_bj, contact_point, axle_dir, side_sign):
     """
@@ -444,7 +682,7 @@ def calculate_isa_exact(theta: float, steer: float, params):
 
 def report_roll_instant_center(q: jnp.array, s: jnp.array, wheel_x: float):
     """
-    Intersection of Screw Axis with the wheel's transverse plane.
+    Intersection of Screw Axis with the wheel's transverse plane (YZ plane of chassis).
     """
     denom = s[0]
     
@@ -584,19 +822,18 @@ def solve_and_measure_corner(theta, steer, params):
     wheel_center = res["wheel_center"]
     R_upright = res["R_upright"]
     side_sign = params["side_sign"]
+    toe_sep = res["toe_seperation"]
+    toe_z_sq = res["toe_z_sq"]
 
     # instant centers
     q, s, h = calculate_isa_exact(theta, steer, params)
     roll_ic_3d = report_roll_instant_center(q, s, contact[0])
     pitch_ic_3d = report_pitch_instant_center(q, s, contact[1])
-    # print(pitch_ic_3d)
-    det = jnp.linalg.det(res["R_upright"])
-    print(det)
 
     return {
         "camber": report_camber(axle_dir),
         "toe": report_toe(axle_dir, side_sign),
-        "kingpin_inc": report_kingpin_inc(upper_bj, lower_bj),
+        "kingpin_inc": report_kingpin_inc(upper_bj, lower_bj, side_sign),
         "caster": report_caster(upper_bj, lower_bj),
         "scrub_radius": report_scrub_radius(upper_bj, lower_bj, contact, axle_dir, side_sign),
         "mechanical_trail": report_mechanical_trail(upper_bj, lower_bj, contact, axle_dir),
@@ -612,5 +849,7 @@ def solve_and_measure_corner(theta, steer, params):
         "toe_link": toe_link,
         "axle_dir": axle_dir,
         "wheel_center": wheel_center,
-        "R_upright": R_upright
+        "R_upright": R_upright,
+        "toe_separation": toe_sep,
+        "toe_z_sq": toe_z_sq
     }

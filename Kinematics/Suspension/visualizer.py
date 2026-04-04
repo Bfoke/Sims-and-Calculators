@@ -17,17 +17,21 @@ class SuspensionVisualizer:
         self.meshes["ground"] = self.plotter.add_mesh(plane, color="gray", opacity=0.3)
 
     # In visualizer.py
-    def add_chassis_points(self, params): # Add params argument
+    def add_chassis_points(self, params, suffix=""): 
         c = self.plotter
         r = 0.02
-        # Use the passed params instead of self.params
         c.add_mesh(pv.Sphere(radius=r, center=params["u_front"]), color="white")
         c.add_mesh(pv.Sphere(radius=r, center=params["u_rear"]), color="white")
         c.add_mesh(pv.Sphere(radius=r, center=params["l_front"]), color="white")
         c.add_mesh(pv.Sphere(radius=r, center=params["l_rear"]), color="white")
-        c.add_mesh(pv.Sphere(radius=r, center=params["rack_origin"]), color="yellow")
         
-        # Draw rails
+        # Give the rack a unique name based on the corner (e.g., rack_mesh_fr)
+        rack_name = f"rack_mesh_{suffix}"
+        self.meshes[rack_name] = c.add_mesh(
+            pv.Sphere(radius=r, center=params["rack_origin"]), 
+            color="yellow"
+        )
+        
         c.add_mesh(pv.Line(params["u_front"], params["u_rear"]), color="white")
         c.add_mesh(pv.Line(params["l_front"], params["l_rear"]), color="white")
 
@@ -110,6 +114,56 @@ class SuspensionVisualizer:
             color="lime", 
             label="Screw Axis (ISA)"
         )
+
+    def add_chassis_skeleton(self, world_params_all):
+        """
+        Connects inboard hardpoints to visualize the chassis frame.
+        world_params_all: dict containing 'fr', 'fl', 'rr', 'rl' world-space params
+        """
+        points = []
+        lines = []
+        
+        def add_line(pt1, pt2):
+            start_idx = len(points)
+            points.extend([pt1, pt2])
+            lines.extend([2, start_idx, start_idx + 1])
+
+        for side in ['fr', 'fl', 'rr', 'rl']:
+            p = world_params_all[side]
+            # Connect Upper Arm mounts
+            add_line(p['u_front'], p['u_rear'])
+            # Connect Lower Arm mounts
+            add_line(p['l_front'], p['l_rear'])
+            # Connect Upper to Lower (Verticals)
+            add_line(p['u_front'], p['l_front'])
+            add_line(p['u_rear'], p['l_rear'])
+            # Connect to Rack
+            add_line(p['u_front'], p['rack_origin'])
+
+        # Cross-Chassis Connections (Front and Rear)
+        # Front Right to Front Left
+        add_line(world_params_all['fr']['u_front'], world_params_all['fl']['u_front'])
+        add_line(world_params_all['fr']['l_front'], world_params_all['fl']['l_front'])
+        # Rear Right to Rear Left
+        add_line(world_params_all['rr']['u_rear'], world_params_all['rl']['u_rear'])
+        add_line(world_params_all['rr']['l_rear'], world_params_all['rl']['l_rear'])
+
+        chassis_mesh = pv.PolyData(np.array(points))
+        chassis_mesh.lines = np.array(lines)
+        
+        self.plotter.add_mesh(chassis_mesh, color="pink", line_width=3, label="Chassis Skeleton")
+
+    def update_rack_displacement(self, name, original_pos, steer_val):
+        """Moves the yellow rack sphere based on steering input."""
+        # Calculate new 3D position
+        new_pos = np.array(original_pos) + np.array([0, steer_val, 0])
+        
+        # Re-create the sphere geometry at the new center
+        new_sphere = pv.Sphere(radius=0.02, center=new_pos)
+        
+        # Update the existing mesh in the plotter
+        if name in self.meshes:
+            self.meshes[name].mapper.dataset.copy_from(new_sphere)
 
     # --- Scene Updaters (For Animation) ---
     def update_wishbone(self, name, p1_mount, p2_mount, bj_current):

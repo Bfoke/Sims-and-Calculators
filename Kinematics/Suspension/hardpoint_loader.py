@@ -38,28 +38,32 @@ def load_suspension_params(file_path, corner_name="front_right"):
     current_side_sign = -base_side_sign if is_left else base_side_sign
 
     params = {
+        # chassis side pickup points
         "u_front": u_f,
         "u_rear": u_r,
         "l_front": l_f,
         "l_rear": l_r,
         
+        #upper wishbone
         "u_origin": u_r,
         "u_axis": (u_f - u_r) / jnp.linalg.norm(u_f - u_r),
         "u_bj_0": u_bj_0,
 
+        # lower wishbone
         "l_origin": l_r,
         "l_axis": (l_f - l_r) / jnp.linalg.norm(l_f - l_r),
         "l_bj_0": l_bj_0,
 
+        # distances between upright joints
         "joint_dist": jnp.linalg.norm(to_jnp(up['upper_balljoint_0']) - to_jnp(up['lower_balljoint_0'])),
         "u_toe_dist": jnp.linalg.norm(to_jnp(up['upper_balljoint_0']) - toe_link_0),
         "l_toe_dist": jnp.linalg.norm(to_jnp(up['lower_balljoint_0']) - toe_link_0),
         
-        # --- Steering Updates ---
+        # steering/ toe
         "rack_origin": rack_origin,
-        # Auto-calculate length if you want to ignore the YAML value
         "tie_rod_len": jnp.linalg.norm(toe_link_0 - rack_origin),
         "forward_rack": steer.get('forward_rack', True), 
+        "toe_link_0": toe_link_0,
 
         "upright_pts_0": jnp.stack([
             to_jnp(up['upper_balljoint_0']),
