@@ -34,9 +34,9 @@ front_right:
   side_sign: -1.0
 
 # Suspension Geometry for Rear Right (RR)
-# Rear left will be same with all y coords sign
+# Rear left will be same with all y coords signs flipped
 rear_right:
-  # Chassis Pickups (Fixed)
+  # Chassis Pickups
   upper_wishbone:
     front: [0.3264, -0.3137, 0.3302]
     rear:  [0.0772, -0.3137, 0.3302]
