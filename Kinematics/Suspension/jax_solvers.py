@@ -261,56 +261,66 @@ def solve_toe_link_jax(
 ):
     P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
 
-    # 1. Primary axis: Kingpin (Stay consistent)
+    # 1. Kingpin Axis (Lower to Upper)
     bj_vec = P2 - P1
     d = jnp.linalg.norm(bj_vec)
     ex = bj_vec / d
 
-    # 2. STABLE BASIS: Use Global Y (Lateral) as reference
-    # This prevents the basis from flipping at theta=0
-    ref = jnp.array([0.0, 1.0, 0.0])
-    ez_vec = jnp.cross(ex, ref)
-    ez = ez_vec / (jnp.linalg.norm(ez_vec) + 1e-9)
-    ey = jnp.cross(ez, ex)
+    # 2. STABLE BASIS: Use Global X (Forward) as reference
+    # This is extremely stable for car geometry and won't flip at theta=0
+    ref = jnp.array([1.0, 0.0, 0.0])
+    ey_vec = jnp.cross(ex, ref)
+    ey = ey_vec / (jnp.linalg.norm(ey_vec) + 1e-9)
+    ez = jnp.cross(ex, ey)
 
-    # 3. Project Rack (P3) into this stable frame
-    # Vector from Upper BJ to Rack
+    # 3. Project Rack (P3) into this local frame
     p3_rel = P3 - P1
-    
     i = jnp.dot(p3_rel, ex)
     j = jnp.dot(p3_rel, ey)
     k = jnp.dot(p3_rel, ez)
 
-    # 4. Correct Trilateration Math
-    # We solve for x, y, z in the local ex, ey, ez frame
-    # where the three spheres are centered at (0,0,0), (d,0,0), and (i,j,k)
+    # 4. MATH: Intersection of 3 Spheres
+    # Sphere 1 & 2 intersect to form a circle in the ey-ez plane
     x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
-    
-    # Quadratic solution for y/z intersection
-    # This accounts for the fact that the rack is not perfectly on the ey axis
-    C1 = upper_toe_dist**2 - x**2
-    C2 = tie_rod_length**2 - (x - i)**2 - j**2 - k**2
-    
-    # We use a simplified projection since we just need the point on the tie-rod arc
-    # This y calculation matches the geometry of the rack-to-upright link
-    y = (C1 - C2 + 2 * j * 0 + 2 * k * 0) / (2 * j + 1e-9) 
-    
-    # Check for geometric validity
-    z_sq = upper_toe_dist**2 - x**2 - y**2
-    z = jnp.sqrt(jnp.maximum(z_sq, 0.0))
+    r_sq = upper_toe_dist**2 - x**2
+    r = jnp.sqrt(jnp.maximum(r_sq, 0.0))
 
-    # 5. Generate potential solutions
-    sol1 = P1 + x * ex + y * ey + z * ez
-    sol2 = P1 + x * ex + y * ey - z * ez
+    # Now intersect that circle (radius r) with Sphere 3 (Rack)
+    # We solve this in the 2D plane of ey-ez
+    h_sq = tie_rod_length**2 - (x - i)**2
+    h = jnp.sqrt(jnp.maximum(h_sq, 0.0))
+    
+    # Distance from BJ-axis to Rack in the ey-ez plane
+    d_plane = jnp.sqrt(jnp.maximum(j**2 + k**2, 1e-9))
+    
+    # Standard 2D circle-circle intersection
+    a = (r**2 - h**2 + d_plane**2) / (2 * d_plane)
+    h_chord = jnp.sqrt(jnp.maximum(r**2 - a**2, 0.0))
+    
+    # Base point along the line from BJ-axis to Rack projection
+    y_base = (a / d_plane) * j
+    z_base = (a / d_plane) * k
+    
+    # Two potential solutions (offset perpendicular to the j-k vector)
+    sol1_y = y_base + (h_chord / d_plane) * k
+    sol1_z = z_base - (h_chord / d_plane) * j
+    
+    sol2_y = y_base - (h_chord / d_plane) * k
+    sol2_z = z_base + (h_chord / d_plane) * j
 
-    # 6. Selection based on static reference (prevents snapping)
+    # 5. Transform back to World Space
+    sol1 = P1 + x * ex + sol1_y * ey + sol1_z * ez
+    sol2 = P1 + x * ex + sol2_y * ey + sol2_z * ez
+
+    # 6. Selection based on distance to static YAML point
     diff1 = jnp.linalg.norm(sol1 - params['toe_link_0'])
     diff2 = jnp.linalg.norm(sol2 - params['toe_link_0'])
     chosen_sol = jnp.where(diff1 < diff2, sol1, sol2)
     
     separation = jnp.linalg.norm(sol1 - sol2)
+    # print(chosen_sol)
+    return chosen_sol, separation, r_sq
     
-    return chosen_sol, separation, z_sq
     
 def solve_corner_jax(upper_theta: float, steer: float, params):
     """
@@ -468,6 +478,7 @@ def get_world_params(local_params, chassis_xyz, roll, pitch):
     world_p['upright_pts_0'] = jnp.stack([world_p['u_bj_0'], world_p['l_bj_0'], world_p['toe_link_0']])
     
     return world_p
+
 ################################################
 # Functions for evaluating suspension geometry #
 ################################################
@@ -504,8 +515,6 @@ def report_camber(axle_dir: jnp.array):
 
     """find camber angle given axle direction vector"""
 
-    # report camber in chassis frame or world frame depending on which axle_dir is passed
-    # TODO: add ability to pass in world frame R and t matrices so can get camber in world frame
     n = axle_dir / jnp.linalg.norm(axle_dir)
 
     # project into YZ plane (remove X component)
@@ -527,8 +536,8 @@ def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
     # reference vertical vector
     vertical_vec = jnp.array([0.0, 0.0, 1.0])
 
-    # plane normal for camber: yz-plane → normal = x-axis
-    plane_normal = jnp.array([1.0, 0.0, 0.0])
+    # plane normal for caster: xz-plane → normal = y-axis
+    plane_normal = jnp.array([0.0, 1.0, 0.0])
     plane_normal /= jnp.linalg.norm(plane_normal)   # ensure unit normal
 
     # project kingpin axis and vertical vector onto the plane

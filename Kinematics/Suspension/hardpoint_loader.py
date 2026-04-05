@@ -55,9 +55,9 @@ def load_suspension_params(file_path, corner_name="front_right"):
         "l_bj_0": l_bj_0,
 
         # distances between upright joints
-        "joint_dist": jnp.linalg.norm(to_jnp(up['upper_balljoint_0']) - to_jnp(up['lower_balljoint_0'])),
-        "u_toe_dist": jnp.linalg.norm(to_jnp(up['upper_balljoint_0']) - toe_link_0),
-        "l_toe_dist": jnp.linalg.norm(to_jnp(up['lower_balljoint_0']) - toe_link_0),
+        "joint_dist": jnp.linalg.norm(u_bj_0 - l_bj_0),
+        "u_toe_dist": jnp.linalg.norm(u_bj_0 - toe_link_0),
+        "l_toe_dist": jnp.linalg.norm(l_bj_0 - toe_link_0),
         
         # steering/ toe
         "rack_origin": rack_origin,
@@ -66,8 +66,8 @@ def load_suspension_params(file_path, corner_name="front_right"):
         "toe_link_0": toe_link_0,
 
         "upright_pts_0": jnp.stack([
-            to_jnp(up['upper_balljoint_0']),
-            to_jnp(up['lower_balljoint_0']),
+            u_bj_0, 
+            l_bj_0, 
             toe_link_0
         ]),
         "axle_root_0": to_jnp(up['axle_root_0']),
