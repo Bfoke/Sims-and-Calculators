@@ -152,7 +152,7 @@ def lower_wb_solve_jax(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
     theta = search_range[jnp.argmin(costs)]
 
     # 2. Newton-Raphson Refinement
-    for _ in range(10):  
+    for _ in range(8):  
         f_val, f_grad = jax.value_and_grad(f)(theta)
         # Add epsilon to grad to avoid div by zero
         theta = theta - f_val / (f_grad + 1e-9)
@@ -160,13 +160,9 @@ def lower_wb_solve_jax(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
     return theta, get_l_bj(theta)
 
 def solve_toe_link_jax_old(
-    upper_bj,
-    lower_bj,
-    rack_pos,
-    upper_toe_dist,
-    lower_toe_dist,
-    tie_rod_length,
-    forward_rack=True
+    upper_bj, lower_bj, rack_pos, 
+    upper_toe_dist, lower_toe_dist, tie_rod_length, 
+    params, forward_rack=True
 ):
     """
     Solve for toe link position given upper balljoint, lower balljoint, and rack position.
@@ -325,21 +321,20 @@ def solve_toe_link_jax(
     # Potential solutions in World Space
     sol1 = P1 + x * ex + (y_base + (h_chord / d_plane) * k) * ey + (z_base - (h_chord / d_plane) * j) * ez
     sol2 = P1 + x * ex + (y_base - (h_chord / d_plane) * k) * ey + (z_base + (h_chord / d_plane) * j) * ez
-
-    # 4. PHYSICAL SELECTION (The Stability Fix)
-    # Instead of comparing to a static point, we use the design intent:
-    # Is the toe link supposed to be FORWARD or REARWARD of the Kingpin?
-    # We check the X-coordinate in the chassis frame.
     
+    sol_bool = jnp.where(h_chord == 0.0, 1.0, 0.0)
+
     if forward_rack:
         # Front-steer: Toe link is usually forward of the kingpin
         chosen_sol = jnp.where(sol1[0] > sol2[0], sol1, sol2)
+        # sol_bool = jnp.where(r_sq == 0.0, 1.0, 0.0)
+
     else:
         # Rear-steer: Toe link is usually rearward of the kingpin
-        chosen_sol = jnp.where(sol1[0] < sol2[0], sol1, sol2)
+        chosen_sol = jnp.where(sol1[0] <= sol2[0], sol1, sol2)
+        sol_bool = jnp.where(sol1[0] < sol2[0], 1.0, 0.0)
     
-    return chosen_sol, jnp.linalg.norm(sol1 - sol2), r_sq
-    
+    return chosen_sol, jnp.linalg.norm(sol1 - sol2), r_sq, sol_bool
     
 def solve_corner_jax(upper_theta: float, steer: float, params):
     """
@@ -357,7 +352,7 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
         params['joint_dist']
     )
     
-    toe_link, toe_sep, toe_z_sq = solve_toe_link_jax(
+    toe_link, toe_sep, toe_z_sq, sol_bool = solve_toe_link_jax(
         u_bj, 
         l_bj, 
         params['rack_origin'] + jnp.array([0, steer, 0]), 
@@ -401,12 +396,23 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
     # Normalize the downward vector in the wheel plane
     d_norm = jnp.linalg.norm(d_vec)
     
-    # Handle the singular case (wheel perfectly horizontal, you fucked up)
+    # Handle the singular case (wheel perfectly horizontal)
     # If d_norm is 0, we just go straight down in world Z
     unit_down_in_plane = jnp.where(d_norm > 1e-9, d_vec / d_norm, jnp.array([0.0, 0.0, -1.0]))
     
     contact_point = wheel_center + params['wheel_radius'] * unit_down_in_plane
 
+    # results = {
+    #     "upper_bj": u_bj,
+    #     "lower_bj": l_bj,
+    #     "toe_link": toe_link,
+    #     "axle_dir": axle_dir,
+    #     "wheel_center": wheel_center,
+    #     "contact_point": contact_point,
+    #     "R_upright": R_upright,
+    #     "toe_seperation": toe_sep,
+    #     "toe_z_sq": toe_z_sq
+    # }
     return {
         "upper_bj": u_bj,
         "lower_bj": l_bj,
@@ -418,7 +424,8 @@ def solve_corner_jax(upper_theta: float, steer: float, params):
         "toe_seperation": toe_sep,
         "toe_z_sq": toe_z_sq,
         "determinant": determinant,
-        "trace": trace
+        "trace": trace,
+        "sol_bool": sol_bool
     }
 
 def solve_theta_for_ground(steer, world_params):
@@ -874,6 +881,7 @@ def solve_and_measure_corner(theta, steer, params):
     toe_z_sq = res["toe_z_sq"]
     determinant = res["determinant"]
     trace = res["trace"]
+    sol_bool = res["sol_bool"]
 
     # instant centers
     q, s, h = calculate_isa_exact(theta, steer, params)
@@ -903,5 +911,6 @@ def solve_and_measure_corner(theta, steer, params):
         "toe_separation": toe_sep,
         "toe_z_sq": toe_z_sq,
         "determinant": determinant,
-        "trace": trace
+        "trace": trace,
+        "sol_bool": sol_bool
     }
