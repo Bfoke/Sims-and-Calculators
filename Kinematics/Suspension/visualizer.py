@@ -54,7 +54,7 @@ class SuspensionVisualizer:
 
     def setup_hardpoints(self, bj_state, name):
         """Creates explicit, prominent spheres at the dynamic joints"""
-        sphere = pv.Sphere(radius=0.02, center=bj_state)
+        sphere = pv.Sphere(radius=0.005, center=bj_state)
         # Use a metallic/bright color to make them "steering axis" points
         self.meshes[name] = self.plotter.add_mesh(sphere, color="magenta", pbr=True, metallic=0.9, label=name)
     
@@ -71,7 +71,7 @@ class SuspensionVisualizer:
         line = np.array(toe) - np.array(rack)
         length = np.linalg.norm(line)
         center = np.array(rack) + line / 2
-        cylinder = pv.Cylinder(center=center, direction=line, radius=0.0125, height=length)
+        cylinder = pv.Cylinder(center=center, direction=line, radius=0.005, height=length)
         self.meshes[name] = self.plotter.add_mesh(cylinder, color="gray")
 
     def setup_wheel_disc(self, center, axle_dir, radius, width, name):
