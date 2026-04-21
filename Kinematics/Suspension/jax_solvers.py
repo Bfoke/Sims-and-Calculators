@@ -67,59 +67,6 @@ def rotate_point(point: jnp.array, theta: float, A: jnp.array, B: jnp.array):
 
     return rotated_point #new upright balljoint location
 
-def rigid_transform_jax_old(original_pos, new_pos):
-    # original_pos and new_pos are (3, 3) -> 3 points, each with 3 coords
-    P = original_pos.T # Make it (3, N)
-    Q = new_pos.T
-
-    P_centroid = jnp.mean(P, axis=1, keepdims=True)
-    Q_centroid = jnp.mean(Q, axis=1, keepdims=True)
-
-    P_centered = P - P_centroid
-    Q_centered = Q - Q_centroid
-
-    H = Q_centered @ P_centered.T
-    U, S, Vt = jnp.linalg.svd(H, full_matrices=False)
-
-    V = Vt.T
-
-    # Proper right-handed correction
-    det_uv = jnp.linalg.det(U @ V.T)
-
-    D = jnp.diag(jnp.array([1.0, 1.0, det_uv]))
-
-    R = U @ D @ V.T
-
-    t = Q_centroid - R @ P_centroid
-    determinant = jnp.linalg.det(R)
-    trace = jnp.trace(R)
-
-    return R, t.flatten(), determinant, trace
-
-def rigid_transform_jax_old2(original_pos, new_pos):
-
-    P = original_pos
-    Q = new_pos
-
-    P_centroid = jnp.mean(P, axis=0)
-    Q_centroid = jnp.mean(Q, axis=0)
-
-    P_centered = P - P_centroid
-    Q_centered = Q - Q_centroid
-
-    H = P_centered.T @ Q_centered
-
-    U, S, Vt = jnp.linalg.svd(H, full_matrices=False)
-
-    d = jnp.sign(jnp.linalg.det(Vt.T @ U.T))
-    D = jnp.diag(jnp.array([1.0, 1.0, d]))
-
-    R = Vt.T @ D @ U.T
-
-    t = Q_centroid - P_centroid @ R
-
-    return R, t, jnp.linalg.det(R), jnp.trace(R)
-
 def rigid_transform_jax(original_pos, new_pos):
     # original_pos (P) and new_pos (Q) are (3, 3)
     # We want R and t such that Q = R*P + t
@@ -134,7 +81,6 @@ def rigid_transform_jax(original_pos, new_pos):
 
     # Covariance matrix
     H = Q_centered @ P_centered.T
-
     U, S, Vt = jnp.linalg.svd(H, full_matrices=False)
 
     # Reflection correction for a proper rotation matrix
@@ -145,49 +91,6 @@ def rigid_transform_jax(original_pos, new_pos):
     t = Q_centroid - R @ P_centroid
 
     return R, t.flatten(), jnp.linalg.det(R), jnp.trace(R)
-
-def lower_wb_solve_jax_NR(u_wb_bj, l_wb_origin, l_wb_axis, l_wb_bj_0, joint_dist):
-    """
-    Find lower wishbone angle with a penalty to keep it below the upper BJ.
-    """
-    def get_l_bj(theta):
-        translated = l_wb_bj_0 - l_wb_origin
-        cos_t = jnp.cos(theta)
-        sin_t = jnp.sin(theta)
-        dot = jnp.dot(l_wb_axis, translated)
-        cross = jnp.cross(l_wb_axis, translated)
-        rotated = translated * cos_t + cross * sin_t + l_wb_axis * dot * (1 - cos_t)
-        return rotated + l_wb_origin
-
-    def f(theta):
-        l_bj = get_l_bj(theta)
-        
-        # 1. Standard kinematic constraint (Distance)
-        dist_err = jnp.linalg.norm(u_wb_bj - l_bj) - joint_dist
-        
-        # 2. Height Penalty: Lower BJ must be below Upper BJ (l_bj[2] < u_wb_bj[2])
-        # If height_diff is positive (inverted), we add a massive penalty.
-        height_diff = l_bj[2] - u_wb_bj[2]
-        
-        # We use a soft-plus style penalty so the gradient points "down" 
-        # even if it accidentally crosses over.
-        # Penalty = (height_diff + 0.1)^2 if height_diff > -0.05
-        penalty = jnp.where(height_diff > -0.05, 1000.0 * (height_diff + 0.05)**2, 0.0)
-        
-        return dist_err**2 + penalty # Minimize squared error + penalty
-
-    # 1. Better Initial Guess: Try a few angles to find the "low" side
-    search_range = jnp.linspace(-jnp.pi/3, jnp.pi/3, 8)
-    costs = jax.vmap(f)(search_range)
-    theta = search_range[jnp.argmin(costs)]
-
-    # 2. Newton-Raphson Refinement
-    for _ in range(8):  
-        f_val, f_grad = jax.value_and_grad(f)(theta)
-        # Add epsilon to grad to avoid div by zero
-        theta = theta - f_val / (f_grad + 1e-9)
-    
-    return theta, get_l_bj(theta)
 
 def lower_wb_solve_jax(u_bj, l_origin, l_axis, l_bj_0, joint_dist):
     # 1. Circle parameters for the lower wishbone
@@ -278,149 +181,10 @@ def solve_toe_link_jax_oldest(
         # If rack is rearward, we want the smaller X
         return jnp.where(sol1[0] < sol2[0], sol1, sol2)
 
-def solve_toe_link_jax_old2(
-    upper_bj, lower_bj, rack_pos, 
-    upper_toe_dist, lower_toe_dist, tie_rod_length, 
-    params, toe_prev=None
-):
-    P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
-
-    # 1. Kingpin Axis
-    bj_vec = P2 - P1
-    d = jnp.linalg.norm(bj_vec)
-    ex = bj_vec / d
-
-    # 2. Stable Basis (Using Global X for ey/ez construction)
-    ref = jnp.array([1.0, 0.0, 0.0])
-
-    # fallback if nearly parallel
-    ref = jnp.where(
-        jnp.abs(jnp.dot(ex, ref)) > 0.99,
-        jnp.array([0.0, 0.0, 1.0]),
-        ref
-    )
-
-    ey = jnp.cross(ex, ref)
-    ey = ey / (jnp.linalg.norm(ey) + 1e-9)
-    ez = jnp.cross(ex, ey)
-
-    # ey_sign = jnp.sign(ez[0])
-
-    # 3. Trilateration
-    p3_rel = P3 - P1
-    i, j, k = jnp.dot(p3_rel, ex), jnp.dot(p3_rel, ey), jnp.dot(p3_rel, ez)
-
-    x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
-    r_sq = jnp.maximum(upper_toe_dist**2 - x**2, 0.0)
-    r = jnp.sqrt(r_sq)
-
-    h_sq = jnp.maximum(tie_rod_length**2 - (x - i)**2, 0.0)
-    h = jnp.sqrt(h_sq)
-    
-    d_plane = jnp.sqrt(jnp.maximum(j**2 + k**2, 1e-9))
-    a = (r**2 - h**2 + d_plane**2) / (2 * d_plane)
-    h_chord = jnp.sqrt(jnp.maximum(r**2 - a**2, 0.0))
-    
-    y_base, z_base = (a / d_plane) * j, (a / d_plane) * k
-    
-    # Potential solutions in World Space
-    sol1 = P1 + x * ex + (y_base + (h_chord / d_plane) * k) * ey + (z_base - (h_chord / d_plane) * j) * ez
-    sol2 = P1 + x * ex + (y_base - (h_chord / d_plane) * k) * ey + (z_base + (h_chord / d_plane) * j) * ez
-    
-    sol_bool = sol2[0] - sol1[0]
-
-    # if forward_rack:
-    #     # Front-steer: Toe link is usually forward of the kingpin
-    #     chosen_sol = jnp.where(sol1[0] > sol2[0], sol1, sol2)
-    #     # sol_bool = jnp.where(chosen_sol == sol1, 1.0, 0.0)
-
-    # else:
-    #     # Rear-steer: Toe link is usually rearward of the kingpin
-    #     chosen_sol = jnp.where(sol1[0] <= sol2[0], sol1, sol2)
-    #     # sol_bool = jnp.where(sol1[0] < sol2[0], 1.0, 0.0)
-
-    if toe_prev is not None:
-        v_prev = toe_prev - P1
-        v1 = sol1 - P1
-        v2 = sol2 - P1
-
-        dot1 = jnp.dot(v_prev, v1)
-        dot2 = jnp.dot(v_prev, v2)
-
-        chosen_sol = jnp.where(dot1 > dot2, sol1, sol2)
-    else:
-        if params["forward_rack"]:
-            chosen_sol = jnp.where(sol1[0] > sol2[0], sol1, sol2)
-        else:
-            chosen_sol = jnp.where(sol1[0] <= sol2[0], sol1, sol2)
-    
-    return sol2, jnp.linalg.norm(sol1 - sol2), r_sq, sol_bool
-
-def solve_toe_link_jax_proj(
-    upper_bj, lower_bj, rack_pos, 
-    upper_toe_dist, lower_toe_dist, tie_rod_length, 
-    params, toe_prev=None
-):
-    P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
-
-    # 1. Primary Axis (Kingpin)
-    bj_vec = P2 - P1
-    d = jnp.linalg.norm(bj_vec)
-    ex = bj_vec / d
-
-    # 2. Stable Basis using the Rack position (P3)
-    # This defines the plane containing the Kingpin and the Rack point.
-    # It only fails if the Rack lies exactly on the Kingpin axis (physically impossible).
-    p3_rel = P3 - P1
-    dot_p3_ex = jnp.dot(p3_rel, ex)
-    
-    # ey is the component of (Rack - UpperBJ) perpendicular to the Kingpin
-    # ey_vec = p3_rel - dot_p3_ex * ex
-    # ey = ey_vec / (jnp.linalg.norm(ey_vec) + 1e-9)
-    ref = jnp.array([0.0, 1.0, 0.0])
-    
-    # ez completes the right-handed coordinate system
-    # ez = jnp.cross(ex, ey)
-    ez_vec = jnp.cross(ex, ref) 
-    ez = ez_vec / (jnp.linalg.norm(ez_vec) + 1e-12)
-    ey = jnp.cross(ez, ex) # ey is now strictly defined by ex and ez
-
-    # 3. Local Coordinates in the ex-ey-ez frame
-    # In this frame, P3 (rack) has coordinates: x=dot_p3_ex, y=jnp.linalg.norm(ey_vec), z=0
-    # i = dot_p3_ex
-    # j = jnp.linalg.norm(ey_vec)
-    p3_rel = P3 - P1
-    i = jnp.dot(p3_rel, ex)
-    j = jnp.dot(p3_rel, ey)
-    k = jnp.dot(p3_rel, ez)
-
-    # Solve for x and y of the toe link relative to P1 in this plane
-    x = (upper_toe_dist**2 - lower_toe_dist**2 + d**2) / (2 * d)
-    y = (upper_toe_dist**2 - tie_rod_length**2 + i**2 + j**2 - 2 * i * x) / (2 * j)
-
-    # z_sq is the "height" out of the Kingpin-Rack plane
-    z_sq = jnp.maximum(upper_toe_dist**2 - x**2 - y**2, 0.0)
-    z = jnp.sqrt(z_sq + 1e-10)
-
-    # 4. Transform back to World Space
-    # Now sol1 and sol2 are mirrored across the Kingpin-Rack plane
-    sol1 = P1 + x * ex + y * ey + z * ez
-    sol2 = P1 + x * ex + y * ey - z * ez
-
-    # 5. Selection Logic
-    # Since the Kingpin-Rack plane is almost vertical, 'z' usually points
-    # longitudinally (Forward/Rearward).
-    if params["forward_rack"]:
-        chosen_sol = jnp.where(sol1[0] > sol2[0], sol1, sol2)
-    else:
-        chosen_sol = jnp.where(sol1[0] <= sol2[0], sol1, sol2)
-        
-    return chosen_sol, jnp.linalg.norm(sol1 - sol2), z_sq, 0.0, sol1, sol2
-
 def solve_toe_link_jax(
     upper_bj, lower_bj, rack_pos, 
     u_dist, l_dist, rod_len, 
-    params, toe_prev=None
+    params
 ):
     P1, P2, P3 = jnp.asarray(upper_bj), jnp.asarray(lower_bj), jnp.asarray(rack_pos)
 
@@ -477,7 +241,7 @@ def solve_toe_link_jax(
         
     return chosen_sol, h_sq, r_sq, 0.0, sol1, sol2
     
-def solve_corner_jax(upper_theta: float, steer: float, params, toe_prev=None):
+def solve_corner_jax(upper_theta: float, steer: float, params):
     """
     Differentiable suspension solver.
     Returns a dictionary of all critical 3D points and vectors.
@@ -501,7 +265,6 @@ def solve_corner_jax(upper_theta: float, steer: float, params, toe_prev=None):
         params['l_toe_dist'], 
         params['tie_rod_len'],
         params,
-        toe_prev=toe_prev
     )
 
     u_bj_0 = params['u_bj_0']
@@ -679,7 +442,7 @@ def report_camber(axle_dir: jnp.array):
     camber = jnp.arctan2(n_yz[1], jnp.abs(n_yz[0]))
     return camber
 
-def report_caster_old(upper_bj: jnp.array, lower_bj: jnp.array):
+def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
 
     """find caster angle given balljoint positions"""
 
@@ -706,19 +469,6 @@ def report_caster_old(upper_bj: jnp.array, lower_bj: jnp.array):
     cos_theta = jnp.clip(cos_theta, -1.0, 1.0)
 
     return jnp.arccos(cos_theta)
-
-def report_caster(upper_bj: jnp.array, lower_bj: jnp.array):
-    """Find caster angle using arctan2 for continuity."""
-    bj_vec = upper_bj - lower_bj
-    
-    # Project into XZ plane (Side View)
-    # x is longitudinal, z is vertical
-    x_comp = bj_vec[0]
-    z_comp = bj_vec[2]
-    
-    # Caster is angle from vertical (Z) in the X direction
-    # Positive caster: Upper BJ is rearward of Lower BJ (negative X)
-    return jnp.arctan2(-x_comp, z_comp)
 
 def report_kingpin_inc_has_jump_bug(upper_bj: jnp.array, lower_bj: jnp.array):
 
@@ -988,13 +738,13 @@ def report_pitch_center(theta_f, theta_r, params_f, params_r):
 # Functions for measuring results #
 ###################################
 
-def solve_and_measure_corner(theta, steer, params, toe_prev=None):
+def solve_and_measure_corner(theta, steer, params):
     """
     Full kinematic evaluation of a single corner.
     """
 
     # solve for positions based on upper CA angle and steering/toe position
-    res = solve_corner_jax(theta, steer, params, toe_prev=toe_prev) 
+    res = solve_corner_jax(theta, steer, params) 
 
     # balljoint, cp, and hardpoint locations
     upper_bj = res["upper_bj"]
