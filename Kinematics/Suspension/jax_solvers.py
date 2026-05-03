@@ -675,13 +675,13 @@ def solve_and_measure_corner(theta, steer, params):
 
     #debug values
 
-    # toe_sep = res["toe_seperation"]
-    # toe_z_sq = res["toe_z_sq"]
-    # determinant = res["determinant"]
-    # trace = res["trace"]
-    # sol_bool = res["sol_bool"]
-    # sol1 = res["sol1"]
-    # sol2 = res["sol2"]
+    toe_sep = res["toe_seperation"]
+    toe_z_sq = res["toe_z_sq"]
+    determinant = res["determinant"]
+    trace = res["trace"]
+    sol_bool = res["sol_bool"]
+    sol1 = res["sol1"]
+    sol2 = res["sol2"]
 
     # instant centers
     q, s, h = calculate_isa(theta, steer, params)
@@ -701,7 +701,7 @@ def solve_and_measure_corner(theta, steer, params):
         "isa_s": s,         
         "screw_pitch": h,
         "wheel_z": wheel_center[2],
-        "contact_patch": contact,
+        "contact_point": contact,
         "upper_bj": upper_bj,
         "lower_bj": lower_bj,
         "toe_link": toe_link,
@@ -711,11 +711,11 @@ def solve_and_measure_corner(theta, steer, params):
 
         #debug values
 
-        # "toe_separation": toe_sep,
-        # "toe_z_sq": toe_z_sq,
-        # "determinant": determinant,
-        # "trace": trace,
-        # "sol_bool": sol_bool,
-        # "sol1": sol1,
-        # "sol2": sol2
+        "toe_separation": toe_sep,
+        "toe_z_sq": toe_z_sq,
+        "determinant": determinant,
+        "trace": trace,
+        "sol_bool": sol_bool,
+        "sol1": sol1,
+        "sol2": sol2
     }

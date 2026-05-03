@@ -55,7 +55,7 @@ rear_right:
 
   # Steering/Toe Constraints
   steering:
-    rack_end_0: [-0.0038, -0.3137, 0.3302]
+    rack_end_0: [-0.0038, -0.3137, 0.3208]
     forward_rack: False
 
   # side sign for fixing sign errors in measurements

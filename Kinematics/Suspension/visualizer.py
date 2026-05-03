@@ -115,7 +115,7 @@ class SuspensionVisualizer:
             label="Screw Axis (ISA)"
         )
 
-    def add_chassis_skeleton(self, world_params_all):
+    def add_chassis_skeleton_old(self, world_params_all):
         """
         Connects inboard hardpoints to visualize the chassis frame.
         world_params_all: dict containing 'fr', 'fl', 'rr', 'rl' world-space params
@@ -152,6 +152,85 @@ class SuspensionVisualizer:
         chassis_mesh.lines = np.array(lines)
         
         self.plotter.add_mesh(chassis_mesh, color="pink", line_width=3, label="Chassis Skeleton")
+
+    def add_chassis_skeleton(self, world_params_all):
+        """
+        Connects inboard hardpoints to visualize the chassis frame and stores reference.
+        """
+        points, lines = self._build_chassis_geometry(world_params_all)
+        
+        chassis_mesh = pv.PolyData(np.array(points))
+        chassis_mesh.lines = np.array(lines)
+        
+        # Store in meshes dict to allow updates
+        self.meshes["chassis_skeleton"] = self.plotter.add_mesh(
+            chassis_mesh, 
+            color="pink", 
+            line_width=3, 
+            label="Chassis Skeleton"
+        )
+    
+    def add_chassis_skeleton(self, world_params_all):
+        """
+        Connects inboard hardpoints to visualize the chassis frame and stores reference.
+        """
+        points, lines = self._build_chassis_geometry(world_params_all)
+        
+        chassis_mesh = pv.PolyData(np.array(points))
+        chassis_mesh.lines = np.array(lines)
+        
+        # Store in meshes dict to allow updates
+        self.meshes["chassis_skeleton"] = self.plotter.add_mesh(
+            chassis_mesh, 
+            color="pink", 
+            line_width=3, 
+            label="Chassis Skeleton"
+        )
+
+    def update_chassis_skeleton(self, world_params_all):
+        """
+        Updates the chassis frame positions during animation (heave/roll/pitch).
+        """
+        if "chassis_skeleton" not in self.meshes:
+            return
+
+        # Generate the new point list using the same order as the builder
+        points, _ = self._build_chassis_geometry(world_params_all)
+        
+        # Update the points of the existing PolyData
+        self.meshes["chassis_skeleton"].mapper.dataset.points = np.array(points)
+
+    def _build_chassis_geometry(self, world_params_all):
+        """Internal helper to ensure point order is consistent between add and update."""
+        points = []
+        lines = []
+        
+        def add_line(pt1, pt2):
+            start_idx = len(points)
+            points.extend([pt1, pt2])
+            lines.extend([2, start_idx, start_idx + 1])
+
+        # 1. Corner-specific verticals and longitudinals
+        for side in ['fr', 'fl', 'rr', 'rl']:
+            p = world_params_all[side]
+            add_line(p['u_front'], p['u_rear'])
+            add_line(p['l_front'], p['l_rear'])
+            add_line(p['u_front'], p['l_front'])
+            add_line(p['u_rear'], p['l_rear'])
+            add_line(p['u_front'], p['rack_origin'])
+
+        # 2. Lateral Cross-members
+        # Front Cross
+        add_line(world_params_all['fr']['u_front'], world_params_all['fl']['u_front'])
+        add_line(world_params_all['fr']['l_front'], world_params_all['fl']['l_front'])
+        # Rear Cross
+        add_line(world_params_all['rr']['u_rear'], world_params_all['rl']['u_rear'])
+        add_line(world_params_all['rr']['l_rear'], world_params_all['rl']['l_rear'])
+        # Mid-chassis (connect front to rear)
+        add_line(world_params_all['fr']['u_rear'], world_params_all['rr']['u_front'])
+        add_line(world_params_all['fl']['u_rear'], world_params_all['rl']['u_front'])
+
+        return points, lines
 
     def update_rack_displacement(self, name, original_pos, steer_val):
         """Moves the yellow rack sphere based on steering input."""
