@@ -2,34 +2,30 @@ import serial
 import csv
 from datetime import datetime
 
-# CHANGE THIS to your Arduino port
-# Windows example: 'COM3'
-# Mac example: '/dev/tty.usbmodem14101'
-# Linux example: '/dev/ttyACM0'
-PORT = 'COM3'
-
+PORT = '/dev/cu.usbmodem1301'
 BAUD_RATE = 9600
 
 filename = f"temperature_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-ser = serial.Serial(PORT, BAUD_RATE)
+ser = serial.Serial(PORT, BAUD_RATE, timeout=1)
 
-with open(filename, mode='w', newline='') as file:
-    writer = csv.writer(file)
+try:
+    with open(filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
 
-    print(f"Saving data to {filename}...")
-    
-    while True:
-        line = ser.readline().decode('utf-8').strip()
+        print(f"Saving data to {filename}...")
 
-        if line:
-            print(line)
+        while True:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
 
-            # Split CSV data
-            data = line.split(',')
+            if line:
+                print(line)
+                writer.writerow(line.split(','))
+                file.flush()
 
-            # Write to file
-            writer.writerow(data)
+except KeyboardInterrupt:
+    print("\nStopping logger...")
 
-            # Save immediately
-            file.flush()
+finally:
+    ser.close()
+    print("Serial port closed.")
