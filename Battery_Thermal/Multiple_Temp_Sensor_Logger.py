@@ -18,9 +18,17 @@ try:
         while True:
             line = ser.readline().decode('utf-8', errors='ignore').strip()
 
-            if line:
-                print(line)
-                writer.writerow(line.split(','))
+            if not line:
+                continue
+
+            print(line)
+
+            parts = line.split(',')
+
+            # Expect:
+            # time_ms,temp1_c,temp2_c
+            if len(parts) == 3:
+                writer.writerow(parts)
                 file.flush()
 
 except KeyboardInterrupt:

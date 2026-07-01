@@ -1,8 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Replace with your filename
-filename = "Al_C_Test_11.csv"
+filename = "conduction1.csv"
 
 # Read CSV
 df = pd.read_csv(filename)
