@@ -2,7 +2,7 @@ import serial
 import csv
 from datetime import datetime
 
-PORT = '/dev/cu.usbmodem11301'
+PORT = '/dev/cu.usbmodem1301'
 BAUD_RATE = 9600
 
 filename = f"temperature_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -27,7 +27,7 @@ try:
 
             # Expect:
             # time_ms,temp1_c,temp2_c
-            if len(parts) == 3:
+            if len(parts) == 4:
                 writer.writerow(parts)
                 file.flush()
 
